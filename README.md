@@ -516,6 +516,85 @@ When debugging, look for these log prefixes in the service worker console:
 - `[CS]` - Content script (in browser console on LinkedIn pages)
 - `[POPUP]` - Popup UI
 
+## Rate Limiting & Detection Prevention
+
+### Current Throttling
+
+The extension includes built-in anti-detection delays:
+
+**Between Pages** (within a search):
+- Random delay: **5-8 seconds** between pages
+- Scroll wait: **2 seconds** for lazy loading
+
+**Between Searches**:
+- **Manual scraping**: 5-10 seconds
+- **Auto-run/scheduled**: 30-60 seconds
+
+**Other Timing**:
+- Page load wait: 3-5 seconds
+- Scroll wait: 2 seconds
+
+### Recommendations for Safe Scraping
+
+⚠️ **Important**: Even with a Pro/Recruiter account, LinkedIn can still detect automated scraping patterns. Account type doesn't exempt you from detection, but may provide higher rate limits.
+
+**Best Practices**:
+
+1. **Limit Searches Per Session**:
+   - **Conservative**: 10-20 searches per hour
+   - **Moderate**: 20-50 searches per hour  
+   - **Aggressive** (not recommended): 50+ searches per hour
+
+2. **Spread Out Scraping**:
+   - Use scheduled scraping instead of running everything at once
+   - Schedule different sources at different times
+   - Avoid scraping the same source multiple times per day
+
+3. **Respect Daily Limits**:
+   - Limit total searches per day (recommended: < 100/day)
+   - Take breaks between large scraping sessions
+
+4. **Watch for Warning Signs**:
+   - CAPTCHAs appearing frequently
+   - "Something went wrong" errors
+   - Account restrictions or warnings from LinkedIn
+   - IP-based rate limiting
+
+5. **Use Scheduled Scraping**:
+   - Spread searches throughout the week
+   - One source per day is safer than multiple sources in one day
+   - Schedule during normal business hours (LinkedIn may be more lenient)
+
+### Adjusting Throttling
+
+You can increase delays in `utils/constants.js`:
+
+```javascript
+export const CONFIG = {
+    MIN_WAIT_SECONDS: 5,      // Increase to 8-10 for more conservative
+    MAX_WAIT_SECONDS: 8,      // Increase to 15-20 for more conservative
+    // ...
+};
+```
+
+For search delays, modify in `background/service_worker.js`:
+- **Manual scrape**: Currently 5-10 seconds (line ~528)
+- **Auto-run**: Currently 30-60 seconds (line ~415)
+
+### Pro/Recruiter Account Considerations
+
+**Advantages**:
+- Higher search result limits
+- More InMail credits
+- Access to Recruiter tools
+
+**Limitations**:
+- **Does NOT prevent detection** of automated scraping
+- LinkedIn still monitors for bot-like behavior patterns
+- Account can still be restricted or banned for scraping
+
+**Recommendation**: Treat your account with care regardless of type. The extension's throttling is designed to mimic human behavior, but excessive scraping can still trigger LinkedIn's anti-scraping systems.
+
 ## Security Notes
 
 ⚠️ **IMPORTANT**:

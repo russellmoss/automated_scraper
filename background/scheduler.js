@@ -138,6 +138,11 @@ export async function setSchedule(scheduleData) {
             hour: scheduleData.hour,
             minute: scheduleData.minute || 0,
             enabled: scheduleData.enabled !== false,
+            // Optional test-mode fields (for fast overlap testing)
+            testEnabled: scheduleData.testEnabled === true,
+            testSearchUrl: scheduleData.testSearchUrl || null,
+            testSearchTitle: scheduleData.testSearchTitle || null,
+            testMaxPages: typeof scheduleData.testMaxPages === 'number' ? scheduleData.testMaxPages : null,
             lastRun: null,
             createdAt: now,
             updatedAt: now
@@ -185,11 +190,58 @@ export async function getScheduleForSource(sourceName) {
 // ============================================================
 
 /**
+ * Get pending schedules from queue
+ * @returns {Promise<Array>} Pending schedules waiting to run
+ */
+export async function getPendingSchedules() {
+    const { [STORAGE_KEYS.PENDING_SCHEDULES]: pending } = await getFromStorage([STORAGE_KEYS.PENDING_SCHEDULES]);
+    return pending || [];
+}
+
+/**
+ * Add schedule to pending queue
+ * @param {Object} schedule - Schedule to queue
+ * @returns {Promise<void>}
+ */
+export async function addPendingSchedule(schedule) {
+    const pending = await getPendingSchedules();
+    
+    // Check if already in queue
+    if (pending.some(s => s.id === schedule.id)) {
+        console.log(`${LOG} Schedule ${schedule.sourceName} already in pending queue`);
+        return;
+    }
+    
+    pending.push({
+        ...schedule,
+        queuedAt: new Date().toISOString()
+    });
+    
+    await saveToStorage({ [STORAGE_KEYS.PENDING_SCHEDULES]: pending });
+    console.log(`${LOG} Queued schedule ${schedule.sourceName} (${pending.length} pending)`);
+}
+
+/**
+ * Remove schedule from pending queue
+ * @param {string} scheduleId - Schedule ID to remove
+ * @returns {Promise<void>}
+ */
+export async function removePendingSchedule(scheduleId) {
+    const pending = await getPendingSchedules();
+    const filtered = pending.filter(s => s.id !== scheduleId);
+    await saveToStorage({ [STORAGE_KEYS.PENDING_SCHEDULES]: filtered });
+    console.log(`${LOG} Removed ${scheduleId} from pending queue (${filtered.length} remaining)`);
+}
+
+/**
  * Check which schedules should run NOW
  * Called every minute by the schedule-check alarm
+ * Also checks pending schedules that were deferred
+ * @param {boolean} includePending - If true, also check pending schedules
+ * @param {string|null} runningSourceName - Source name that's currently running (to exclude)
  * @returns {Promise<Array>} Schedules that should execute
  */
-export async function checkSchedules() {
+export async function checkSchedules(includePending = true, runningSourceName = null) {
     const schedules = await getSchedules();
     const now = getEasternTime();
     const currentDay = now.getDay();
@@ -198,33 +250,66 @@ export async function checkSchedules() {
     
     const schedulesToRun = [];
     
+    // Get pending schedule IDs to avoid duplicates
+    // Always load pending so we can suppress re-trigger spam while something is already queued.
+    const pending = await getPendingSchedules();
+    const pendingIds = new Set(pending.map(s => s.id));
+    
+    // Check regular schedules
     for (const schedule of schedules) {
         if (!schedule.enabled) continue;
+        
+        // Skip if this schedule is currently running
+        if (runningSourceName && schedule.sourceName === runningSourceName) {
+            console.log(`${LOG} Skipping ${schedule.sourceName} - currently running`);
+            continue;
+        }
+        
+        // Skip if already in pending queue (avoid duplicates)
+        if (pendingIds.has(schedule.id)) {
+            continue;
+        }
         
         // Check if day matches
         if (schedule.dayOfWeek !== currentDay) continue;
         
-        // Check if within 5-minute window of scheduled time
+        // Check if within 10-minute window of scheduled time (5 min before to 5 min after)
         const scheduledMinutes = schedule.hour * 60 + schedule.minute;
         const currentMinutes = currentHour * 60 + currentMinute;
         const diff = currentMinutes - scheduledMinutes;
         
-        // Allow 0-5 minute window (just after scheduled time)
-        if (diff < 0 || diff > 5) continue;
+        // Allow -5 to +10 minute window (5 min before to 10 min after scheduled time)
+        // This accounts for service worker timing variations
+        if (diff < -5 || diff > 10) continue;
         
-        // Check if already ran recently (within 23 hours)
+        // Check if already ran recently
+        // - Normal schedules: 23 hour cooldown (prevents repeat runs the same day)
+        // - Test schedules: short cooldown (15 min) to allow overlap testing without waiting a full day
         if (schedule.lastRun) {
             const lastRunTime = new Date(schedule.lastRun);
             const hoursSinceLastRun = (now - lastRunTime) / (1000 * 60 * 60);
+            const cooldownHours = schedule.testEnabled === true ? 0.25 : 23; // 15 min for test mode
             
-            if (hoursSinceLastRun < 23) {
-                console.log(`${LOG} Skipping ${schedule.sourceName} - ran ${hoursSinceLastRun.toFixed(1)} hours ago`);
+            if (hoursSinceLastRun < cooldownHours) {
+                const unit = cooldownHours < 1 ? 'minutes' : 'hours';
+                const value = cooldownHours < 1 ? (hoursSinceLastRun * 60).toFixed(0) : hoursSinceLastRun.toFixed(1);
+                console.log(`${LOG} Skipping ${schedule.sourceName} - ran ${value} ${unit} ago`);
                 continue;
             }
         }
         
         console.log(`${LOG} ✅ Schedule triggered: ${schedule.sourceName}`);
         schedulesToRun.push(schedule);
+    }
+    
+    // Check pending schedules (deferred due to overlap)
+    if (includePending && pending.length > 0) {
+        for (const pendingSchedule of pending) {
+            // Remove the queuedAt field before adding
+            const { queuedAt, ...schedule } = pendingSchedule;
+            schedulesToRun.push(schedule);
+            console.log(`${LOG} ✅ Pending schedule ready: ${schedule.sourceName}`);
+        }
     }
     
     return schedulesToRun;
@@ -386,6 +471,20 @@ export function validateSchedule(schedule) {
     
     if (typeof schedule.minute !== 'number' || schedule.minute < 0 || schedule.minute > 59) {
         return { valid: false, error: 'Minute must be 0-59' };
+    }
+
+    if (schedule.testEnabled === true) {
+        if (schedule.testSearchUrl && typeof schedule.testSearchUrl !== 'string') {
+            return { valid: false, error: 'Test search URL must be a string' };
+        }
+        if (schedule.testSearchUrl && !schedule.testSearchUrl.startsWith('https://www.linkedin.com/search/results/people')) {
+            return { valid: false, error: 'Test search URL must be a LinkedIn people search URL' };
+        }
+        if (schedule.testMaxPages != null) {
+            if (typeof schedule.testMaxPages !== 'number' || schedule.testMaxPages < 1 || schedule.testMaxPages > 10) {
+                return { valid: false, error: 'Test max pages must be between 1 and 10' };
+            }
+        }
     }
     
     return { valid: true };

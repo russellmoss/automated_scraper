@@ -4,14 +4,20 @@
 (function() {
     'use strict';
 
+    // Bump this when debugging “which script is actually running” in Chrome
+    const SCRIPT_VERSION = '2025-12-17-testmode-v1';
+
     // ============================================================
     // CONFIG
     // ============================================================
     const CONFIG = {
         MAX_PAGES: 1000,
-        MIN_WAIT_SECONDS: 5,
-        MAX_WAIT_SECONDS: 8,
-        SCROLL_WAIT_MS: 2000
+        MIN_WAIT_SECONDS: 8,
+        MAX_WAIT_SECONDS: 25,
+        SCROLL_WAIT_MS: 2000,
+        LONG_PAUSE_CHANCE: 0.15,
+        LONG_PAUSE_MIN_SECONDS: 45,
+        LONG_PAUSE_MAX_SECONDS: 120
     };
 
     // ============================================================
@@ -40,13 +46,34 @@
     // ============================================================
     // UTILITY FUNCTIONS
     // ============================================================
-    function wait(ms) {
-        return new Promise(resolve => setTimeout(resolve, ms));
+    /**
+     * Abortable wait - returns early if stopRequested becomes true.
+     * This makes "Stop" responsive even during long anti-detection pauses.
+     */
+    async function wait(ms, checkIntervalMs = 250) {
+        const end = Date.now() + ms;
+        while (Date.now() < end) {
+            if (stopRequested) return;
+            const remaining = end - Date.now();
+            const chunk = Math.min(checkIntervalMs, Math.max(0, remaining));
+            if (chunk <= 0) break;
+            await new Promise(resolve => setTimeout(resolve, chunk));
+        }
     }
 
     function randomDelay() {
         const min = CONFIG.MIN_WAIT_SECONDS * 1000;
         const max = CONFIG.MAX_WAIT_SECONDS * 1000;
+        return Math.floor(Math.random() * (max - min + 1)) + min;
+    }
+
+    function shouldTakeLongPause() {
+        return Math.random() < CONFIG.LONG_PAUSE_CHANCE;
+    }
+
+    function longPauseDelay() {
+        const min = CONFIG.LONG_PAUSE_MIN_SECONDS * 1000;
+        const max = CONFIG.LONG_PAUSE_MAX_SECONDS * 1000;
         return Math.floor(Math.random() * (max - min + 1)) + min;
     }
 
@@ -458,6 +485,7 @@
     async function waitForEntriesToLoad(expected, timeout = 10000) {
         const startTime = Date.now();
         while (Date.now() - startTime < timeout) {
+            if (stopRequested) return false;
             const cards = findProfileCards();
             if (cards.length >= expected) {
                 return true;
@@ -597,7 +625,7 @@
     // ============================================================
     // MAIN SCRAPING LOOP
     // ============================================================
-    async function startScraping(sourceName) {
+    async function startScraping(sourceName, maxPagesOverride) {
         if (isScrapingActive) {
             console.warn('[CS] Scraping already active');
             return;
@@ -606,6 +634,7 @@
         isScrapingActive = true;
         stopRequested = false;
         currentSourceName = sourceName;
+        const maxPages = Number.isFinite(maxPagesOverride) ? Math.max(1, Math.min(1000, maxPagesOverride)) : CONFIG.MAX_PAGES;
         
         console.log(`[CS] 🚀 Starting scrape for source: ${sourceName}`);
         
@@ -615,7 +644,7 @@
         let totalPages = 0;
         
         try {
-            while (totalPages < CONFIG.MAX_PAGES && !stopRequested) {
+            while (totalPages < maxPages && !stopRequested) {
                 // Wait for entries to load
                 await waitForEntriesToLoad(1, 10000);
                 
@@ -653,6 +682,13 @@
                 const delay = randomDelay();
                 console.log(`[CS] ⏳ Waiting ${(delay/1000).toFixed(1)}s before next page...`);
                 await wait(delay);
+                
+                // Occasional long pause to simulate user distraction
+                if (shouldTakeLongPause()) {
+                    const longDelay = longPauseDelay();
+                    console.log(`[CS] ☕ Taking a break... ${(longDelay/1000).toFixed(0)}s (simulating user distraction)`);
+                    await wait(longDelay);
+                }
             }
             
             console.log(`[CS] ✅ Scraping complete: ${totalProfiles} profiles from ${totalPages} pages`);
@@ -712,7 +748,7 @@
         switch (action) {
             case 'START_SCRAPING':
                 const sourceName = message.sourceName || 'Unknown';
-                startScraping(sourceName).catch(error => {
+                startScraping(sourceName, message.maxPages).catch(error => {
                     console.error('[CS] Start scraping error:', error);
                 });
                 sendResponse({ success: true });
@@ -744,7 +780,7 @@
     // ============================================================
     // INITIALIZATION
     // ============================================================
-    console.log('[CS] ✅ Content script loaded');
+    console.log(`[CS] ✅ Content script loaded (${SCRIPT_VERSION})`);
     
     // Auto-validate selectors on search pages
     if (window.location.href.includes('linkedin.com/search/results/people')) {

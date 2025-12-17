@@ -204,19 +204,36 @@
                         <option value="6">Saturday</option>
                     </select>
                 </div>
-                <div class="form-row">
+                <div class="form-group">
+                    <label for="schedule-time-input">Time (24-hour format, e.g., 15:30 for 3:30 PM)</label>
+                    <input type="text" id="schedule-time-input" name="schedule-time-input" 
+                           placeholder="HH:MM" pattern="^([0-1]?[0-9]|2[0-3]):([0-5][0-9])$"
+                           title="Enter time in 24-hour format (HH:MM), e.g., 09:00, 15:30, 23:45">
+                    <small class="form-hint">Or use dropdowns: 
+                        <select id="schedule-hour-select" name="schedule-hour-select" style="width: auto; display: inline-block; margin: 0 5px;"></select>
+                        <select id="schedule-minute-select" name="schedule-minute-select" style="width: auto; display: inline-block; margin: 0 5px;"></select>
+                    </small>
+                </div>
+
+                <div class="form-group">
+                    <label class="inline-label">
+                        <input type="checkbox" id="schedule-test-enabled" name="schedule-test-enabled">
+                        Test mode (fast overlap testing)
+                    </label>
+                    <small class="form-hint">Run only a single selected search and optionally limit pages to keep runs short.</small>
+                </div>
+
+                <div id="schedule-test-options" class="hidden">
                     <div class="form-group">
-                        <label for="schedule-hour-select">Hour (0-23)</label>
-                        <select id="schedule-hour-select" name="schedule-hour-select"></select>
+                        <label for="schedule-test-search-select">Test Search (one URL)</label>
+                        <select id="schedule-test-search-select" name="schedule-test-search-select"></select>
+                        <small class="form-hint">This is pulled from your Input Sheet for the selected source.</small>
                     </div>
+
                     <div class="form-group">
-                        <label for="schedule-minute-select">Minute</label>
-                        <select id="schedule-minute-select" name="schedule-minute-select">
-                            <option value="0">:00</option>
-                            <option value="15">:15</option>
-                            <option value="30">:30</option>
-                            <option value="45">:45</option>
-                        </select>
+                        <label for="schedule-test-max-pages">Max pages to scrape (1-10)</label>
+                        <input type="number" id="schedule-test-max-pages" name="schedule-test-max-pages" min="1" max="10" value="1">
+                        <small class="form-hint">Set to 1 for very fast testing; higher values increase run time.</small>
                     </div>
                 </div>
             </div>

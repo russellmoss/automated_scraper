@@ -218,8 +218,13 @@ function cacheElements() {
     elements.modalCloseBtn = document.getElementById('modal-close-btn');
     elements.scheduleSourceSelect = document.getElementById('schedule-source-select');
     elements.scheduleDaySelect = document.getElementById('schedule-day-select');
+    elements.scheduleTimeInput = document.getElementById('schedule-time-input');
     elements.scheduleHourSelect = document.getElementById('schedule-hour-select');
     elements.scheduleMinuteSelect = document.getElementById('schedule-minute-select');
+    elements.scheduleTestEnabled = document.getElementById('schedule-test-enabled');
+    elements.scheduleTestOptions = document.getElementById('schedule-test-options');
+    elements.scheduleTestSearchSelect = document.getElementById('schedule-test-search-select');
+    elements.scheduleTestMaxPages = document.getElementById('schedule-test-max-pages');
     elements.cancelScheduleBtn = document.getElementById('cancel-schedule-btn');
     elements.saveScheduleBtn = document.getElementById('save-schedule-btn');
     
@@ -239,13 +244,46 @@ function cacheElements() {
 
 function populateHourDropdown() {
     const select = elements.scheduleHourSelect;
+    select.innerHTML = '';
     for (let i = 0; i < 24; i++) {
         const option = document.createElement('option');
         option.value = i;
         const hour = i % 12 || 12;
         const ampm = i < 12 ? 'AM' : 'PM';
-        option.textContent = `${hour} ${ampm}`;
+        option.textContent = `${String(i).padStart(2, '0')} (${hour} ${ampm})`;
         select.appendChild(option);
+    }
+}
+
+function populateMinuteDropdown() {
+    const select = elements.scheduleMinuteSelect;
+    select.innerHTML = '';
+    for (let i = 0; i < 60; i++) {
+        const option = document.createElement('option');
+        option.value = i;
+        option.textContent = `:${String(i).padStart(2, '0')}`;
+        select.appendChild(option);
+    }
+}
+
+// Sync time input with dropdowns
+function syncTimeInputToDropdowns() {
+    const hour = parseInt(elements.scheduleHourSelect.value) || 0;
+    const minute = parseInt(elements.scheduleMinuteSelect.value) || 0;
+    elements.scheduleTimeInput.value = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
+// Sync dropdowns with time input
+function syncDropdownsToTimeInput() {
+    const timeStr = elements.scheduleTimeInput.value.trim();
+    const timeRegex = /^([0-1]?[0-9]|2[0-3]):([0-5][0-9])$/;
+    const match = timeStr.match(timeRegex);
+    
+    if (match) {
+        const hour = parseInt(match[1]);
+        const minute = parseInt(match[2]);
+        elements.scheduleHourSelect.value = hour.toString();
+        elements.scheduleMinuteSelect.value = minute.toString();
     }
 }
 
@@ -340,6 +378,19 @@ function setupEventListeners() {
     elements.cancelScheduleBtn.addEventListener('click', closeScheduleModal);
     elements.saveScheduleBtn.addEventListener('click', saveSchedule);
     
+    // Sync time input and dropdowns
+    elements.scheduleTimeInput.addEventListener('input', syncDropdownsToTimeInput);
+    elements.scheduleHourSelect.addEventListener('change', syncTimeInputToDropdowns);
+    elements.scheduleMinuteSelect.addEventListener('change', syncTimeInputToDropdowns);
+
+    // Schedule test mode toggle + per-source search list
+    elements.scheduleTestEnabled.addEventListener('change', () => {
+        elements.scheduleTestOptions.classList.toggle('hidden', !elements.scheduleTestEnabled.checked);
+    });
+    elements.scheduleSourceSelect.addEventListener('change', () => {
+        populateScheduleTestSearchDropdown(elements.scheduleSourceSelect.value);
+    });
+    
     // Settings
     elements.saveWebhookBtn.addEventListener('click', saveWebhookUrl);
     elements.testWebhookBtn.addEventListener('click', testWebhook);
@@ -347,6 +398,29 @@ function setupEventListeners() {
     // Footer
     elements.retryFailedBtn.addEventListener('click', retryFailed);
     elements.deduplicateBtn.addEventListener('click', deduplicate);
+}
+
+function populateScheduleTestSearchDropdown(sourceName) {
+    const select = elements.scheduleTestSearchSelect;
+    select.innerHTML = '';
+
+    const sourceSearches = state.searches.filter(s => s.source === sourceName);
+    if (sourceSearches.length === 0) {
+        const opt = document.createElement('option');
+        opt.value = '';
+        opt.textContent = 'No searches found for this source';
+        select.appendChild(opt);
+        return;
+    }
+
+    sourceSearches.forEach((s, idx) => {
+        const opt = document.createElement('option');
+        // store both url and title (title can be empty)
+        opt.value = s.url || '';
+        opt.textContent = `${idx + 1}. ${s.title || '(No title)'}`;
+        opt.dataset.title = s.title || '';
+        select.appendChild(opt);
+    });
 }
 
 // ============================================================
@@ -486,7 +560,7 @@ function renderScheduleList() {
         const item = document.createElement('div');
         item.className = 'schedule-item';
         item.innerHTML = `
-            <div class="schedule-info">
+            <div class="schedule-info" data-schedule-id="${schedule.id}" style="cursor: pointer; flex: 1;">
                 <div class="schedule-source">${schedule.sourceName}</div>
                 <div class="schedule-time">${days[schedule.dayOfWeek]} at ${hour}:${minute} ${ampm}</div>
             </div>
@@ -499,11 +573,19 @@ function renderScheduleList() {
             </div>
         `;
         
+        // Make schedule info clickable to edit
+        item.querySelector('.schedule-info').addEventListener('click', (e) => {
+            // Don't trigger if clicking inside nested elements (though there aren't any)
+            e.stopPropagation();
+            openScheduleModal(schedule.id);
+        });
+        
         item.querySelector('input[type="checkbox"]').addEventListener('change', (e) => {
             toggleScheduleEnabled(schedule.id, e.target.checked);
         });
         
-        item.querySelector('.delete-btn').addEventListener('click', () => {
+        item.querySelector('.delete-btn').addEventListener('click', (e) => {
+            e.stopPropagation(); // Prevent triggering edit
             deleteSchedule(schedule.id);
         });
         
@@ -754,19 +836,95 @@ async function compareTabs() {
 // SCHEDULES
 // ============================================================
 
-function openScheduleModal() {
+let editingScheduleId = null;
+
+function openScheduleModal(scheduleId = null) {
+    editingScheduleId = scheduleId;
+    
+    // Update modal header
+    const modalHeader = elements.scheduleModal?.querySelector('.modal-header h2');
+    if (modalHeader) {
+        modalHeader.textContent = scheduleId ? 'Edit Schedule' : 'Add Schedule';
+    }
+    
+    // Reset form
+    elements.scheduleSourceSelect.value = '';
+    elements.scheduleDaySelect.value = '0';
+    elements.scheduleHourSelect.value = '9';
+    elements.scheduleMinuteSelect.value = '0';
+    syncTimeInputToDropdowns(); // Sync the time input
+
+    // Reset test mode UI
+    elements.scheduleTestEnabled.checked = false;
+    elements.scheduleTestOptions.classList.add('hidden');
+    elements.scheduleTestMaxPages.value = '1';
+    elements.scheduleTestSearchSelect.innerHTML = '';
+    
+    // If editing, populate form with existing schedule data
+    if (scheduleId) {
+        const schedule = state.schedules.find(s => s.id === scheduleId);
+        if (schedule) {
+            elements.scheduleSourceSelect.value = schedule.sourceName;
+            elements.scheduleDaySelect.value = schedule.dayOfWeek.toString();
+            elements.scheduleHourSelect.value = schedule.hour.toString();
+            elements.scheduleMinuteSelect.value = schedule.minute.toString();
+            syncTimeInputToDropdowns(); // Sync the time input with dropdown values
+
+            // Populate test dropdown for the selected source, then select current value if present
+            populateScheduleTestSearchDropdown(schedule.sourceName);
+            elements.scheduleTestEnabled.checked = schedule.testEnabled === true;
+            elements.scheduleTestOptions.classList.toggle('hidden', !elements.scheduleTestEnabled.checked);
+            if (schedule.testMaxPages != null) {
+                elements.scheduleTestMaxPages.value = String(schedule.testMaxPages);
+            }
+            if (schedule.testSearchUrl) {
+                elements.scheduleTestSearchSelect.value = schedule.testSearchUrl;
+            }
+        }
+    }
+
+    // If adding new, pre-populate test dropdown once a source is chosen
+    if (!scheduleId && elements.scheduleSourceSelect.value) {
+        populateScheduleTestSearchDropdown(elements.scheduleSourceSelect.value);
+    }
+    
     elements.scheduleModal.classList.remove('hidden');
 }
 
 function closeScheduleModal() {
     elements.scheduleModal.classList.add('hidden');
+    editingScheduleId = null;
 }
 
 async function saveSchedule() {
     const sourceName = elements.scheduleSourceSelect.value;
     const dayOfWeek = parseInt(elements.scheduleDaySelect.value);
-    const hour = parseInt(elements.scheduleHourSelect.value);
-    const minute = parseInt(elements.scheduleMinuteSelect.value);
+    
+    // Parse time from input field (preferred) or use dropdowns as fallback
+    let hour, minute;
+    const timeStr = elements.scheduleTimeInput.value.trim();
+    const timeRegex = /^([0-1]?[0-9]|2[0-3]):([0-5][0-9])$/;
+    const match = timeStr.match(timeRegex);
+    
+    if (match) {
+        // Time input has valid format
+        hour = parseInt(match[1]);
+        minute = parseInt(match[2]);
+    } else {
+        // Fallback to dropdowns
+        hour = parseInt(elements.scheduleHourSelect.value) || 0;
+        minute = parseInt(elements.scheduleMinuteSelect.value) || 0;
+    }
+    
+    // Validate hour and minute
+    if (hour < 0 || hour > 23) {
+        showToast('Hour must be between 0 and 23', 'error');
+        return;
+    }
+    if (minute < 0 || minute > 59) {
+        showToast('Minute must be between 0 and 59', 'error');
+        return;
+    }
     
     if (!sourceName) {
         showToast('Please select a source', 'error');
@@ -776,8 +934,41 @@ async function saveSchedule() {
     setButtonLoading(elements.saveScheduleBtn, true);
     
     try {
+        // If editing, include the existing schedule ID and preserve enabled state
+        let scheduleData = { sourceName, dayOfWeek, hour, minute };
+
+        // Optional test mode fields
+        const testEnabled = elements.scheduleTestEnabled.checked === true;
+        if (testEnabled) {
+            const testSearchUrl = elements.scheduleTestSearchSelect.value || null;
+            const selectedOpt = elements.scheduleTestSearchSelect.selectedOptions?.[0];
+            const testSearchTitle = selectedOpt?.dataset?.title || selectedOpt?.textContent || null;
+            const testMaxPagesRaw = elements.scheduleTestMaxPages.value;
+            const testMaxPages = testMaxPagesRaw ? parseInt(testMaxPagesRaw, 10) : null;
+
+            scheduleData.testEnabled = true;
+            scheduleData.testSearchUrl = testSearchUrl;
+            scheduleData.testSearchTitle = testSearchTitle;
+            scheduleData.testMaxPages = Number.isFinite(testMaxPages) ? testMaxPages : null;
+        } else {
+            scheduleData.testEnabled = false;
+            scheduleData.testSearchUrl = null;
+            scheduleData.testSearchTitle = null;
+            scheduleData.testMaxPages = null;
+        }
+        
+        if (editingScheduleId) {
+            const existingSchedule = state.schedules.find(s => s.id === editingScheduleId);
+            if (existingSchedule) {
+                scheduleData.id = editingScheduleId;
+                scheduleData.enabled = existingSchedule.enabled; // Preserve enabled state
+            }
+        } else {
+            scheduleData.enabled = true; // New schedules are enabled by default
+        }
+        
         await sendMessage('SET_SCHEDULE', {
-            schedule: { sourceName, dayOfWeek, hour, minute, enabled: true }
+            schedule: scheduleData
         });
         
         // Reload schedules

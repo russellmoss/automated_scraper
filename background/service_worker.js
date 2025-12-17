@@ -18,7 +18,8 @@ import {
     getSchedules, setSchedule, deleteSchedule, checkSchedules,
     markScheduleRun, addExecutionRecord, updateExecutionRecord,
     getExecutionHistory, getScheduleForSource, calculateNextRun,
-    generateSheetUrlWithGid
+    generateSheetUrlWithGid, addPendingSchedule, removePendingSchedule,
+    getPendingSchedules
 } from './scheduler.js';
 import {
     setWebhookUrl, getWebhookUrl, testWebhook,
@@ -28,6 +29,7 @@ import {
 import { CONFIG, ALARM_NAMES, MESSAGE_ACTIONS, STORAGE_KEYS, LOG_PREFIXES } from '../utils/constants.js';
 
 const LOG = LOG_PREFIXES.SERVICE_WORKER;
+const SERVICE_WORKER_VERSION = '2025-12-17-testmode-v1';
 
 // ============================================================
 // STATE
@@ -52,6 +54,76 @@ let manualScrapeState = {
     currentSearchIndex: 0,
     workbookId: null
 };
+
+// ============================================================
+// SCRAPE WAIT MANAGEMENT (Abort in-flight waits on Stop)
+// ============================================================
+const scrapeWaiters = new Map(); // tabId -> { resolve, cleanup }
+
+function abortScrapeWait(tabId, reason = 'aborted') {
+    const waiter = scrapeWaiters.get(tabId);
+    if (!waiter) return;
+    try {
+        waiter.cleanup?.();
+    } catch (e) {
+        // ignore
+    }
+    try {
+        waiter.resolve?.({ aborted: true, reason });
+    } catch (e) {
+        // ignore
+    }
+    scrapeWaiters.delete(tabId);
+}
+
+// ============================================================
+// AUTO-RUN RESUME FINALIZATION (fixes "stuck running" after reload)
+// ============================================================
+async function resumeAutoRunAfterReload() {
+    try {
+        console.log(`${LOG} Resuming auto-run after reload`);
+        chrome.alarms.create(ALARM_NAMES.AUTO_RUN_KEEPALIVE, { periodInMinutes: 0.3 });
+
+        await processAutoRunQueue();
+
+        // Finalize state (processAutoRunQueue does not clear isRunning on its own)
+        const { autoRunState: latest } = await getFromStorage(['autoRunState']);
+        const executionId = latest?.executionId || null;
+        const sourceName = latest?.config?.sources?.[0] || latest?.progress?.currentSource || 'Unknown Source';
+        const totalProfiles = latest?.progress?.totalProfiles || 0;
+        const totalSearches = latest?.progress?.totalSearches || 0;
+        const completedSearches = latest?.progress?.completedSearches || totalSearches || 0;
+
+        // Mark auto-run as not running
+        autoRunState = {
+            ...(latest || autoRunState),
+            isRunning: false
+        };
+        await saveToStorage({ autoRunState });
+        chrome.alarms.clear(ALARM_NAMES.AUTO_RUN_KEEPALIVE);
+
+        // Complete execution record + notification (only if we have an executionId)
+        if (executionId) {
+            await updateExecutionRecord(executionId, {
+                status: 'completed',
+                searchesCompleted: completedSearches,
+                profilesScraped: totalProfiles,
+                completedAt: new Date().toISOString()
+            });
+            await notifyScheduleCompleted(sourceName, totalProfiles, totalSearches).catch(() => {});
+        }
+    } catch (error) {
+        console.error(`${LOG} Auto-run resume error:`, error);
+        try {
+            autoRunState.isRunning = false;
+            await saveToStorage({ autoRunState });
+            chrome.alarms.clear(ALARM_NAMES.AUTO_RUN_KEEPALIVE);
+        } catch (_) {}
+    } finally {
+        // After any resume attempt, try to run pending schedules
+        await processPendingSchedules();
+    }
+}
 
 // ============================================================
 // STORAGE HELPERS
@@ -138,8 +210,48 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
         case ALARM_NAMES.SCHEDULE_CHECK:
             console.log(`${LOG} Schedule check tick`);
             try {
-                const schedulesToRun = await checkSchedules();
+                // OVERLAP PROTECTION: Skip if already running
+                const currentState = await getFromStorage(['autoRunState', 'manualScrapeState']);
+                const isRunning = currentState.autoRunState?.isRunning || currentState.manualScrapeState?.isRunning;
+                
+                // If something is running, ONLY queue newly-due regular schedules.
+                // Do NOT re-process already pending schedules every minute (avoids log spam and confusion).
+                if (isRunning) {
+                    const runningSourceName =
+                        currentState.autoRunState?.isRunning ? (currentState.autoRunState?.config?.sources?.[0] || null) :
+                        currentState.manualScrapeState?.isRunning ? (currentState.manualScrapeState?.sourceName || null) :
+                        null;
+
+                    const dueSchedules = await checkSchedules(false, runningSourceName);
+                    if (dueSchedules.length > 0) {
+                        const pendingBefore = await getPendingSchedules();
+                        const beforeIds = new Set(pendingBefore.map(s => s.id));
+                        for (const schedule of dueSchedules) {
+                            await addPendingSchedule(schedule);
+                        }
+                        const pendingAfter = await getPendingSchedules();
+                        const newlyQueued = pendingAfter.filter(s => !beforeIds.has(s.id)).length;
+                        console.log(`${LOG} ⏸️ Scrape already in progress, queued ${newlyQueued} new schedule(s) for later`);
+                    }
+                    break;
+                }
+
+                // Nothing running: if we have pending schedules, run them first.
+                const pending = await getPendingSchedules();
+                if (pending.length > 0) {
+                    await processPendingSchedules();
+                    break;
+                }
+
+                // Otherwise, run any currently-due schedules.
+                const schedulesToRun = await checkSchedules(false, null);
                 for (const schedule of schedulesToRun) {
+                    // Re-check state before each schedule (in case something started)
+                    const stateCheck = await getFromStorage(['autoRunState', 'manualScrapeState']);
+                    if (stateCheck.autoRunState?.isRunning || stateCheck.manualScrapeState?.isRunning) {
+                        await addPendingSchedule(schedule);
+                        break;
+                    }
                     console.log(`${LOG} 🚀 Triggering scheduled run for ${schedule.sourceName}`);
                     await executeScheduledRun(schedule);
                 }
@@ -190,13 +302,30 @@ async function executeScheduledRun(schedule) {
         
         // Read searches from input sheet
         const searchData = await readSheet(inputSheetId, 'Sheet1!A:C');
-        const searches = searchData.slice(1) // Skip header
+        let searches = searchData.slice(1) // Skip header
             .filter(row => row[0] === schedule.sourceName)
             .map(row => ({
                 source: row[0],
                 title: row[1],
                 url: row[2]
             }));
+
+        // Test mode: run only one selected search for fast overlap testing
+        if (schedule.testEnabled === true) {
+            const testUrl = schedule.testSearchUrl;
+            const testTitle = schedule.testSearchTitle || 'Test Search';
+
+            if (testUrl) {
+                searches = [{
+                    source: schedule.sourceName,
+                    title: testTitle,
+                    url: testUrl
+                }];
+            } else if (searches.length > 0) {
+                // Fallback to first search if none selected
+                searches = [searches[0]];
+            }
+        }
         
         if (searches.length === 0) {
             throw new Error(`No searches found for ${schedule.sourceName}`);
@@ -227,7 +356,12 @@ async function executeScheduledRun(schedule) {
             executionId: execution.id, // Store execution ID for live updates
             config: {
                 sources: [schedule.sourceName],
-                groupedSearches: { [schedule.sourceName]: searches }
+                groupedSearches: { [schedule.sourceName]: searches },
+                scrapeOptions: {
+                    maxPages: schedule.testEnabled === true && typeof schedule.testMaxPages === 'number'
+                        ? schedule.testMaxPages
+                        : null
+                }
             },
             progress: {
                 currentSource: schedule.sourceName,
@@ -276,6 +410,9 @@ async function executeScheduledRun(schedule) {
         // Reset state
         autoRunState.isRunning = false;
         await saveToStorage({ autoRunState });
+        
+        // Check for pending schedules and run the next one
+        await processPendingSchedules();
     }
 }
 
@@ -325,6 +462,99 @@ async function getOrCreateDedicatedScrapeTab() {
 }
 
 // ============================================================
+// NOISE ACTIVITY (Anti-Detection)
+// ============================================================
+async function performNoiseActivity(tabId) {
+    if (!CONFIG.NOISE_ACTIVITY_ENABLED) return;
+    if (Math.random() > CONFIG.NOISE_CHANCE) return;
+    
+    const noiseUrl = CONFIG.NOISE_URLS[Math.floor(Math.random() * CONFIG.NOISE_URLS.length)];
+    const duration = (CONFIG.NOISE_MIN_DURATION_SECONDS + 
+        Math.random() * (CONFIG.NOISE_MAX_DURATION_SECONDS - CONFIG.NOISE_MIN_DURATION_SECONDS)) * 1000;
+    
+    console.log(`${LOG} 🎭 Noise activity: browsing ${noiseUrl} for ${(duration/1000).toFixed(0)}s`);
+    
+    try {
+        await chrome.tabs.update(tabId, { url: noiseUrl });
+        await new Promise(resolve => setTimeout(resolve, duration));
+    } catch (e) {
+        console.log(`${LOG} Noise activity skipped:`, e.message);
+    }
+}
+
+function getSearchDelay() {
+    const min = CONFIG.BETWEEN_SEARCH_MIN_SECONDS * 1000;
+    const max = CONFIG.BETWEEN_SEARCH_MAX_SECONDS * 1000;
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+/**
+ * Process pending schedules that were deferred due to overlap
+ * Runs the next schedule in the queue if nothing is currently running
+ */
+async function processPendingSchedules() {
+    // Prevent re-entrancy (can be called from multiple places)
+    if (processPendingSchedules._isRunning) return;
+    processPendingSchedules._isRunning = true;
+
+    try {
+        while (true) {
+            // Check if something is running
+            const currentState = await getFromStorage(['autoRunState', 'manualScrapeState']);
+            if (currentState.autoRunState?.isRunning || currentState.manualScrapeState?.isRunning) {
+                return; // Still running, don't process pending
+            }
+
+            const pending = await getPendingSchedules();
+            if (pending.length === 0) {
+                return; // No pending schedules
+            }
+
+            // Get the first pending schedule (oldest queued)
+            const nextSchedule = pending[0];
+            const { queuedAt, ...schedule } = nextSchedule;
+
+            // Validate against latest stored schedule and drop stale queue entries
+            const schedules = await getSchedules();
+            const latest = schedules.find(s => s.id === schedule.id);
+            if (!latest || !latest.enabled) {
+                console.log(`${LOG} 🧹 Dropping pending schedule ${schedule.sourceName} - no longer exists or disabled`);
+                await removePendingSchedule(schedule.id);
+                continue;
+            }
+
+            // If the schedule has run AFTER it was queued, this pending entry is stale and should be dropped.
+            // This is safer than a blanket "ran recently" check (which can break test-mode re-runs).
+            if (queuedAt && latest.lastRun) {
+                const queuedAtTime = new Date(queuedAt).getTime();
+                const lastRunTime = new Date(latest.lastRun).getTime();
+                if (Number.isFinite(queuedAtTime) && Number.isFinite(lastRunTime) && lastRunTime > queuedAtTime) {
+                    console.log(`${LOG} 🧹 Dropping stale pending schedule ${latest.sourceName} - it ran after being queued`);
+                    await removePendingSchedule(latest.id);
+                    continue;
+                }
+            }
+
+            console.log(`${LOG} 🔄 Processing pending schedule: ${latest.sourceName} (was queued at ${queuedAt})`);
+
+            // Remove from queue before executing
+            await removePendingSchedule(latest.id);
+
+            // Execute the schedule (this will set autoRunState.isRunning true)
+            try {
+                await executeScheduledRun(latest);
+            } catch (error) {
+                console.error(`${LOG} Failed to execute pending schedule ${latest.sourceName}:`, error);
+                // Stop processing to avoid tight loops; next alarm tick will retry
+                return;
+            }
+        }
+    } finally {
+        processPendingSchedules._isRunning = false;
+    }
+}
+
+// ============================================================
 // AUTO-RUN QUEUE PROCESSOR
 // ============================================================
 async function processAutoRunQueue() {
@@ -341,6 +571,7 @@ async function processAutoRunQueue() {
     
     const { config, progress } = state;
     const { sources, groupedSearches } = config;
+    const maxPagesOverride = config?.scrapeOptions?.maxPages;
     
     // Process each search
     // WORKBOOK RESOLUTION: For each source, look up workbookId from sourceMapping
@@ -384,11 +615,16 @@ async function processAutoRunQueue() {
             try {
                 await chrome.tabs.sendMessage(tab.id, {
                     action: MESSAGE_ACTIONS.START_SCRAPING,
-                    sourceName: source
+                    sourceName: source,
+                    maxPages: maxPagesOverride || undefined
                 });
                 
                 // Wait for scraping to complete (listen for SCRAPING_COMPLETE)
-                await waitForScrapingComplete(tab.id);
+                const result = await waitForScrapingComplete(tab.id);
+                if (result?.aborted) {
+                    console.log(`${LOG} Auto-run scrape aborted (${result.reason || 'unknown'})`);
+                    return;
+                }
                 
             } catch (e) {
                 console.error(`${LOG} Scraping error:`, e);
@@ -411,10 +647,13 @@ async function processAutoRunQueue() {
                 }).catch(() => {});
             }
             
-            // Random delay between searches (30-60 seconds)
-            const delay = 30000 + Math.random() * 30000;
+            // Random delay between searches (45-90 seconds)
+            const delay = getSearchDelay();
             console.log(`${LOG} Waiting ${(delay/1000).toFixed(0)}s before next search...`);
             await new Promise(resolve => setTimeout(resolve, delay));
+            
+            // Noise activity (40% chance) - browse LinkedIn naturally
+            await performNoiseActivity(tab.id);
         }
         
         // Reset for next source
@@ -473,11 +712,21 @@ async function processManualScrape() {
             if (abortedState.executionId) {
                 await updateExecutionRecord(abortedState.executionId, {
                     status: 'failed',
+                    completedAt: new Date().toISOString(),
                     error: 'Manually aborted',
                     searchesCompleted: i,
                     profilesScraped: abortedState.totalProfiles || 0
                 });
             }
+            
+            // Always reset state when aborted to prevent stuck state
+            manualScrapeState.isRunning = false;
+            manualScrapeState.isAborted = false;
+            await saveToStorage({ manualScrapeState });
+            
+            // Process pending schedules after cleanup
+            await processPendingSchedules();
+            
             return;
         }
         
@@ -512,7 +761,11 @@ async function processManualScrape() {
             });
             
             // Wait for scraping to complete
-            await waitForScrapingComplete(tab.id);
+            const result = await waitForScrapingComplete(tab.id);
+            if (result?.aborted) {
+                console.log(`${LOG} Manual scrape aborted (${result.reason || 'unknown'})`);
+                return;
+            }
             
             // Reload state to get updated totalProfiles
             const updatedState = await getFromStorage(['manualScrapeState']);
@@ -539,10 +792,13 @@ async function processManualScrape() {
             ).catch(err => console.error(`${LOG} Failed to send error webhook:`, err));
         }
         
-        // Random delay between searches (5-10 seconds for manual scrape)
-        const delay = 5000 + Math.random() * 5000;
-        console.log(`${LOG} Waiting ${(delay/1000).toFixed(1)}s before next search...`);
+        // Random delay between searches (45-90 seconds for anti-detection)
+        const delay = getSearchDelay();
+        console.log(`${LOG} Waiting ${(delay/1000).toFixed(0)}s before next search...`);
         await new Promise(resolve => setTimeout(resolve, delay));
+        
+        // Noise activity between searches
+        await performNoiseActivity(tab.id);
     }
     
     // Get final state to ensure we have the latest totalProfiles
@@ -571,6 +827,9 @@ async function processManualScrape() {
     manualScrapeState.isAborted = false;
     await saveToStorage({ manualScrapeState });
     
+    // Check for pending schedules after manual scrape completes
+    await processPendingSchedules();
+    
     // Send completion message
     chrome.runtime.sendMessage({
         action: MESSAGE_ACTIONS.MANUAL_SCRAPE_PROGRESS,
@@ -591,12 +850,13 @@ async function processManualScrape() {
 
 async function waitForScrapingComplete(tabId, timeout = 1800000) {
     return new Promise((resolve) => {
-        const startTime = Date.now();
-        
+        // If there's already a waiter for this tab, abort it
+        abortScrapeWait(tabId, 'replaced');
+
         const listener = (message, sender) => {
             if (sender.tab?.id === tabId && message.action === MESSAGE_ACTIONS.SCRAPING_COMPLETE) {
-                chrome.runtime.onMessage.removeListener(listener);
-                
+                cleanup();
+
                 const profilesFromThisSearch = message.totalProfiles || 0;
                 
                 // Update total profiles for auto-run state
@@ -647,18 +907,24 @@ async function waitForScrapingComplete(tabId, timeout = 1800000) {
                         // For now, we'll handle this in executeScheduledRun
                     }
                 });
-                
+
                 resolve(message);
             }
         };
-        
-        chrome.runtime.onMessage.addListener(listener);
-        
-        // Timeout fallback
-        setTimeout(() => {
-            chrome.runtime.onMessage.removeListener(listener);
+
+        const timeoutId = setTimeout(() => {
+            cleanup();
             resolve({ timeout: true });
         }, timeout);
+
+        function cleanup() {
+            chrome.runtime.onMessage.removeListener(listener);
+            clearTimeout(timeoutId);
+            scrapeWaiters.delete(tabId);
+        }
+
+        scrapeWaiters.set(tabId, { resolve, cleanup });
+        chrome.runtime.onMessage.addListener(listener);
     });
 }
 
@@ -991,8 +1257,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 
                 case MESSAGE_ACTIONS.STOP_AUTO_RUN: {
                     autoRunState.isAborted = true;
+                    autoRunState.isRunning = false;
                     await saveToStorage({ autoRunState });
                     chrome.alarms.clear(ALARM_NAMES.AUTO_RUN_KEEPALIVE);
+
+                    // Try to stop the active content script scrape and unblock any waiter
+                    try {
+                        const stored = await getFromStorage([STORAGE_KEYS.DEDICATED_SCRAPE_TAB_ID]);
+                        const tabId = stored[STORAGE_KEYS.DEDICATED_SCRAPE_TAB_ID];
+                        if (tabId) {
+                            abortScrapeWait(tabId, 'auto_run_stop');
+                            await chrome.tabs.sendMessage(tabId, { action: MESSAGE_ACTIONS.STOP_SCRAPING }).catch(() => {});
+                        }
+                    } catch (e) {
+                        // ignore
+                    }
+
+                    // Process pending schedules now that auto-run is stopped
+                    await processPendingSchedules();
                     response = { success: true };
                     break;
                 }
@@ -1052,8 +1334,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 
                 case MESSAGE_ACTIONS.STOP_MANUAL_SCRAPE: {
                     manualScrapeState.isAborted = true;
+                    manualScrapeState.isRunning = false; // Also set isRunning to false when stopping
                     await saveToStorage({ manualScrapeState });
                     stopKeepAlive();
+
+                    // Stop the active content script scrape and unblock any waiter
+                    try {
+                        const stored = await getFromStorage([STORAGE_KEYS.DEDICATED_SCRAPE_TAB_ID]);
+                        const tabId = stored[STORAGE_KEYS.DEDICATED_SCRAPE_TAB_ID];
+                        if (tabId) {
+                            abortScrapeWait(tabId, 'manual_stop');
+                            await chrome.tabs.sendMessage(tabId, { action: MESSAGE_ACTIONS.STOP_SCRAPING }).catch(() => {});
+                        }
+                    } catch (e) {
+                        // ignore
+                    }
+                    
+                    // Process pending schedules now that manual scrape is stopped
+                    await processPendingSchedules();
+                    
                     response = { success: true };
                     break;
                 }
@@ -1191,17 +1490,39 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         startQueueProcessor();
         startScheduleChecker();
         
-        // Resume auto-run if it was running
-        if (autoRunState.isRunning && !autoRunState.isAborted) {
-            console.log(`${LOG} Resuming auto-run after reload`);
-            chrome.alarms.create(ALARM_NAMES.AUTO_RUN_KEEPALIVE, { periodInMinutes: 0.3 });
-            processAutoRunQueue().catch(error => {
-                console.error(`${LOG} Auto-run resume error:`, error);
-                updateAutoRunState({ isRunning: false, error: error.message });
-            });
+        // Clean up stuck states (isRunning but actually not running)
+        const storedStates = await getFromStorage(['autoRunState', 'manualScrapeState']);
+        let cleanedUp = false;
+        
+        // Check if manual scrape state is stuck (aborted but still marked as running)
+        if (storedStates.manualScrapeState?.isAborted && storedStates.manualScrapeState?.isRunning) {
+            console.log(`${LOG} 🧹 Cleaning up stuck manual scrape state (aborted but still marked as running)`);
+            manualScrapeState = {
+                isRunning: false,
+                isAborted: false,
+                sourceName: null,
+                searches: [],
+                currentSearchIndex: 0,
+                workbookId: null,
+                executionId: null,
+                totalProfiles: 0
+            };
+            await saveToStorage({ manualScrapeState });
+            cleanedUp = true;
         }
         
-        console.log(`${LOG} ✅ Service worker initialized`);
+        // Resume auto-run if it was running
+        if (autoRunState.isRunning && !autoRunState.isAborted) {
+            // Important: on reload we must finalize/clear state ourselves, otherwise it stays "running" forever.
+            resumeAutoRunAfterReload().catch(() => {});
+        }
+        
+        // Process pending schedules if we cleaned up a stuck state
+        if (cleanedUp) {
+            await processPendingSchedules();
+        }
+        
+        console.log(`${LOG} ✅ Service worker initialized (${SERVICE_WORKER_VERSION})`);
         console.log(`${LOG}    Workbooks: ${savedWorkbooks.length}`);
         console.log(`${LOG}    Mappings: ${Object.keys(sourceMapping).length}`);
         

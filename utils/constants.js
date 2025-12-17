@@ -2,10 +2,31 @@
 
 export const CONFIG = {
     // Scraping timing (anti-detection)
-    MIN_WAIT_SECONDS: 5,
-    MAX_WAIT_SECONDS: 8,
+    MIN_WAIT_SECONDS: 8,
+    MAX_WAIT_SECONDS: 25,
     SCROLL_WAIT_MS: 2000,
     MAX_PAGES: 1000,
+    
+    // Long pause configuration (simulates user distraction)
+    LONG_PAUSE_CHANCE: 0.15,       // 15% chance of long pause after each page
+    LONG_PAUSE_MIN_SECONDS: 45,    // Minimum long pause duration
+    LONG_PAUSE_MAX_SECONDS: 120,   // Maximum long pause duration (2 minutes)
+    
+    // Between-search delays (service worker)
+    BETWEEN_SEARCH_MIN_SECONDS: 45,
+    BETWEEN_SEARCH_MAX_SECONDS: 90,
+    
+    // Noise activity config
+    NOISE_ACTIVITY_ENABLED: true,
+    NOISE_CHANCE: 0.4,                // 40% chance of noise activity between searches
+    NOISE_MIN_DURATION_SECONDS: 15,
+    NOISE_MAX_DURATION_SECONDS: 45,
+    NOISE_URLS: [
+        'https://www.linkedin.com/feed/',
+        'https://www.linkedin.com/mynetwork/',
+        'https://www.linkedin.com/notifications/',
+        'https://www.linkedin.com/jobs/',
+    ],
     
     // Queue processing
     QUEUE_PROCESS_INTERVAL_MINUTES: 0.5,  // 30 seconds
@@ -36,6 +57,7 @@ export const STORAGE_KEYS = {
     // Schedules (NEW)
     SCHEDULES: 'schedules',
     EXECUTION_HISTORY: 'executionHistory',
+    PENDING_SCHEDULES: 'pendingSchedules',  // Queue for schedules deferred due to overlap
     
     // State
     SYNC_QUEUE: 'syncQueue',
