@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Savvy Pirate</title>
+    <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+    <!-- HEADER -->
+    <header class="header">
+        <img src="../icons/icon48.png" alt="Savvy Pirate" class="logo">
+        <div class="header-text">
+            <h1>Savvy Pirate</h1>
+            <span class="version">v2.0</span>
+        </div>
+        <div id="status-indicator" class="status-indicator"></div>
+    </header>
+    
+    <main class="main-content">
+        <!-- SECTION: Input Sheet -->
+        <section class="section" id="section-input">
+            <div class="section-header" data-section="input">
+                <span>📋 Input Sheet</span>
+                <span class="chevron">▼</span>
+            </div>
+            <div class="section-content">
+                <div class="input-group">
+                    <input type="text" id="input-sheet-url" name="input-sheet-url" placeholder="Google Sheet URL or ID">
+                    <button id="load-sheet-btn" class="btn btn-primary">Load</button>
+                </div>
+                <div id="input-sheet-info" class="info-box hidden">
+                    <a id="input-sheet-link" href="#" target="_blank"></a>
+                    <span id="search-count"></span>
+                </div>
+            </div>
+        </section>
+        
+        <!-- SECTION: Workbook Mappings -->
+        <section class="section" id="section-mappings">
+            <div class="section-header" data-section="mappings">
+                <span>📁 Workbook Mappings</span>
+                <span class="chevron">▼</span>
+            </div>
+            <div class="section-content">
+                <div id="mapping-list" class="mapping-list"></div>
+                <button id="add-workbook-btn" class="btn btn-secondary">+ Add Workbook</button>
+            </div>
+        </section>
+        
+        <!-- SECTION: Manual Scraping -->
+        <section class="section" id="section-scraping">
+            <div class="section-header" data-section="scraping">
+                <span>🔍 Manual Scraping</span>
+                <span class="chevron">▼</span>
+            </div>
+            <div class="section-content">
+                <div class="input-group">
+                    <select id="source-select" name="source-select">
+                        <option value="">Select source...</option>
+                    </select>
+                </div>
+                <div class="button-group">
+                    <button id="start-scrape-btn" class="btn btn-primary">▶ Start Scrape</button>
+                    <button id="stop-scrape-btn" class="btn btn-danger hidden">⏹ Stop</button>
+                </div>
+                <div id="scrape-progress" class="progress-container hidden">
+                    <div class="progress-bar">
+                        <div id="progress-fill" class="progress-fill"></div>
+                    </div>
+                    <span id="progress-text"></span>
+                </div>
+            </div>
+        </section>
+        
+        <!-- SECTION: Compare Tabs -->
+        <section class="section" id="section-compare">
+            <div class="section-header" data-section="compare">
+                <span>📊 Compare Tabs</span>
+                <span class="chevron">▼</span>
+            </div>
+            <div class="section-content">
+                <div class="input-group">
+                    <select id="compare-workbook-select" name="compare-workbook-select">
+                        <option value="">Select workbook...</option>
+                    </select>
+                </div>
+                <div class="compare-grid">
+                    <div class="compare-column">
+                        <label for="compare-tab1">Baseline Tab (older)</label>
+                        <select id="compare-tab1" name="compare-tab1"></select>
+                    </div>
+                    <div class="compare-column">
+                        <label for="compare-tab2">Compare Tab (newer)</label>
+                        <select id="compare-tab2" name="compare-tab2"></select>
+                    </div>
+                </div>
+                <div class="input-group">
+                    <input type="text" id="compare-output-name" name="compare-output-name" placeholder="Output tab name (e.g., New_12_16)">
+                </div>
+                <div class="input-group">
+                    <label for="compare-key-column">Compare by:</label>
+                    <select id="compare-key-column" name="compare-key-column">
+                        <option value="1">Name</option>
+                        <option value="5">LinkedIn URL</option>
+                    </select>
+                </div>
+                <button id="compare-tabs-btn" class="btn btn-primary">Compare Tabs</button>
+                <div id="compare-results" class="results-box hidden"></div>
+            </div>
+        </section>
+        
+        <!-- SECTION: Schedules -->
+        <section class="section" id="section-schedules">
+            <div class="section-header" data-section="schedules">
+                <span>⏰ Schedules</span>
+                <span class="chevron">▼</span>
+            </div>
+            <div class="section-content">
+                <div id="schedule-list" class="schedule-list"></div>
+                <button id="add-schedule-btn" class="btn btn-secondary">+ Add Schedule</button>
+                <div id="next-run-info" class="info-box"></div>
+            </div>
+        </section>
+        
+        <!-- SECTION: Execution History -->
+        <section class="section" id="section-history">
+            <div class="section-header" data-section="history">
+                <span>📜 Execution History</span>
+                <span class="chevron">▼</span>
+            </div>
+            <div class="section-content">
+                <table id="history-table" class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Date</th>
+                            <th>Source</th>
+                            <th>Status</th>
+                            <th>Profiles</th>
+                        </tr>
+                    </thead>
+                    <tbody id="history-tbody"></tbody>
+                </table>
+            </div>
+        </section>
+        
+        <!-- SECTION: Settings -->
+        <section class="section" id="section-settings">
+            <div class="section-header" data-section="settings">
+                <span>⚙️ Settings</span>
+                <span class="chevron">▼</span>
+            </div>
+            <div class="section-content">
+                <div class="input-group">
+                    <label for="webhook-url">Zapier Webhook URL</label>
+                    <input type="text" id="webhook-url" name="webhook-url" placeholder="https://hooks.zapier.com/hooks/catch/...">
+                </div>
+                <div class="input-group">
+                    <button id="save-webhook-btn" class="btn btn-secondary">Save Webhook URL</button>
+                    <button id="test-webhook-btn" class="btn btn-outline">Test Webhook</button>
+                </div>
+                <div id="webhook-status" class="status-text"></div>
+                <div class="info-box mt-2">
+                    <small>Webhook sends notifications for scraping failures with: time, failure type, person name, and search name.</small>
+                </div>
+            </div>
+        </section>
+    </main>
+    
+    <!-- FOOTER -->
+    <footer class="footer">
+        <div class="queue-status">
+            <span>Queue: <span id="queue-pending">0</span> pending</span>
+            <span class="separator">|</span>
+            <span id="queue-failed-container" class="hidden">
+                <span id="queue-failed">0</span> failed
+                <button id="retry-failed-btn" class="btn-link">Retry</button>
+            </span>
+        </div>
+        <button id="deduplicate-btn" class="btn btn-outline btn-sm">Deduplicate</button>
+    </footer>
+    
+    <!-- MODAL: Add Schedule -->
+    <div id="schedule-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Add Schedule</h2>
+                <button id="modal-close-btn" class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="schedule-source-select">Source</label>
+                    <select id="schedule-source-select" name="schedule-source-select"></select>
+                </div>
+                <div class="form-group">
+                    <label for="schedule-day-select">Day of Week</label>
+                    <select id="schedule-day-select" name="schedule-day-select">
+                        <option value="0">Sunday</option>
+                        <option value="1">Monday</option>
+                        <option value="2">Tuesday</option>
+                        <option value="3">Wednesday</option>
+                        <option value="4">Thursday</option>
+                        <option value="5">Friday</option>
+                        <option value="6">Saturday</option>
+                    </select>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="schedule-hour-select">Hour (0-23)</label>
+                        <select id="schedule-hour-select" name="schedule-hour-select"></select>
+                    </div>
+                    <div class="form-group">
+                        <label for="schedule-minute-select">Minute</label>
+                        <select id="schedule-minute-select" name="schedule-minute-select">
+                            <option value="0">:00</option>
+                            <option value="15">:15</option>
+                            <option value="30">:30</option>
+                            <option value="45">:45</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="cancel-schedule-btn" class="btn btn-secondary">Cancel</button>
+                <button id="save-schedule-btn" class="btn btn-primary">Save Schedule</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- MODAL: Add Workbook -->
+    <div id="workbook-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Add Workbook</h2>
+                <button id="workbook-modal-close-btn" class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="new-workbook-url">Google Sheet URL or ID</label>
+                    <input type="text" id="new-workbook-url" name="new-workbook-url" placeholder="https://docs.google.com/spreadsheets/d/...">
+                </div>
+                <div class="form-group">
+                    <label for="new-workbook-source">Map to Source (optional)</label>
+                    <select id="new-workbook-source" name="new-workbook-source"></select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="cancel-workbook-btn" class="btn btn-secondary">Cancel</button>
+                <button id="confirm-workbook-btn" class="btn btn-primary">Add Workbook</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- TOAST NOTIFICATIONS -->
+    <div id="toast-container" class="toast-container"></div>
+    
+    <script src="popup.js"></script>
+</body>
+</html>
