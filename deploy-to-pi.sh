@@ -129,14 +129,17 @@ copy_quick_files() {
     fi
     
     # Copy just the files most frequently edited
+    $SCP_CMD "${LOCAL_EXTENSION_PATH}/background/auth.js" "${PI_USER}@${PI_HOST}:${PI_EXTENSION_PATH}/background/"
     $SCP_CMD "${LOCAL_EXTENSION_PATH}/background/scheduler.js" "${PI_USER}@${PI_HOST}:${PI_EXTENSION_PATH}/background/"
     $SCP_CMD "${LOCAL_EXTENSION_PATH}/background/service_worker.js" "${PI_USER}@${PI_HOST}:${PI_EXTENSION_PATH}/background/"
     $SCP_CMD "${LOCAL_EXTENSION_PATH}/background/notifications.js" "${PI_USER}@${PI_HOST}:${PI_EXTENSION_PATH}/background/"
     $SCP_CMD "${LOCAL_EXTENSION_PATH}/background/sheets_api.js" "${PI_USER}@${PI_HOST}:${PI_EXTENSION_PATH}/background/"
+    $SCP_CMD "${LOCAL_EXTENSION_PATH}/background/sheet_sync.js" "${PI_USER}@${PI_HOST}:${PI_EXTENSION_PATH}/background/"
     $SCP_CMD "${LOCAL_EXTENSION_PATH}/content/content.js" "${PI_USER}@${PI_HOST}:${PI_EXTENSION_PATH}/content/"
     $SCP_CMD "${LOCAL_EXTENSION_PATH}/popup/popup.js" "${PI_USER}@${PI_HOST}:${PI_EXTENSION_PATH}/popup/"
     $SCP_CMD "${LOCAL_EXTENSION_PATH}/popup/popup.html" "${PI_USER}@${PI_HOST}:${PI_EXTENSION_PATH}/popup/"
     $SCP_CMD "${LOCAL_EXTENSION_PATH}/utils/constants.js" "${PI_USER}@${PI_HOST}:${PI_EXTENSION_PATH}/utils/"
+    $SCP_CMD "${LOCAL_EXTENSION_PATH}/manifest.json" "${PI_USER}@${PI_HOST}:${PI_EXTENSION_PATH}/"
     
     if [ $? -eq 0 ]; then
         log_success "Quick files copied successfully"

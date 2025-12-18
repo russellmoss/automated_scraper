@@ -64,8 +64,18 @@ async function launchWebAuthFlowAuth() {
     const params = new URLSearchParams(url.hash?.startsWith('#') ? url.hash.substring(1) : url.hash);
     const accessToken = params.get('access_token');
     const expiresIn = params.get('expires_in');
+    const error = params.get('error') || url.searchParams.get('error');
+    const errorDescription = params.get('error_description') || url.searchParams.get('error_description');
 
     if (!accessToken) {
+        if (error) {
+            if (error === 'redirect_uri_mismatch') {
+                throw new Error(
+                    `OAuth error: redirect_uri_mismatch. Add this exact redirect URI to your Google Cloud OAuth client authorized redirect URIs: ${redirectUri}`
+                );
+            }
+            throw new Error(`OAuth error: ${error}${errorDescription ? ` (${errorDescription})` : ''}`);
+        }
         throw new Error('No access_token in OAuth response');
     }
 

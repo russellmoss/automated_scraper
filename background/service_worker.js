@@ -30,6 +30,14 @@ import {
     notifyLinkedInCheckpoint,
     notifyGoogleAuthExpired
 } from './notifications.js';
+import {
+    loadWorkbookConfig,
+    syncWorkbookConfig,
+    getWorkbookConfig,
+    clearWorkbookConfig,
+    setSyncInterval,
+    getSyncInterval
+} from './sheet_sync.js';
 import { CONFIG, ALARM_NAMES, MESSAGE_ACTIONS, STORAGE_KEYS, LOG_PREFIXES } from '../utils/constants.js';
 
 const LOG = LOG_PREFIXES.SERVICE_WORKER;
@@ -269,6 +277,28 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
                 console.error(`${LOG} Queue process error:`, e);
             }
             break;
+
+        case ALARM_NAMES.WORKBOOK_SYNC:
+            console.log(`${LOG} 🔄 Workbook sync alarm triggered`);
+            try {
+                // IMPORTANT: Skip sync if scraping is active (prevent race conditions)
+                const { autoRunState: ars, manualScrapeState: mss } = await getFromStorage([
+                    'autoRunState', 'manualScrapeState'
+                ]);
+                if (ars?.isRunning || mss?.isRunning) {
+                    console.log(`${LOG} ⏸️ Skipping sync - scrape in progress`);
+                    break;
+                }
+
+                const result = await syncWorkbookConfig();
+                if (result?.changes?.length) {
+                    chrome.action.setBadgeText({ text: '!' });
+                    chrome.action.setBadgeBackgroundColor({ color: '#4CAF50' });
+                }
+            } catch (e) {
+                console.error(`${LOG} Workbook sync alarm error:`, e);
+            }
+            break;
             
         case ALARM_NAMES.SCHEDULE_CHECK:
             console.log(`${LOG} Schedule check tick`);
@@ -334,6 +364,37 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 });
 
 // ============================================================
+// EXTENSION LIFECYCLE (Live Sync alarm restore)
+// ============================================================
+chrome.runtime.onInstalled.addListener(async () => {
+    try {
+        console.log(`${LOG} Extension installed/updated`);
+        const cfg = await getWorkbookConfig();
+        if (cfg?.workbookId) {
+            const syncInterval = await getSyncInterval();
+            chrome.alarms.create(ALARM_NAMES.WORKBOOK_SYNC, { periodInMinutes: syncInterval });
+            console.log(`${LOG} Workbook sync alarm created on install (${syncInterval} min)`);
+        }
+    } catch (e) {
+        console.warn(`${LOG} onInstalled workbook alarm restore failed:`, e?.message || e);
+    }
+});
+
+chrome.runtime.onStartup.addListener(async () => {
+    try {
+        console.log(`${LOG} Extension startup`);
+        const cfg = await getWorkbookConfig();
+        if (cfg?.workbookId) {
+            const syncInterval = await getSyncInterval();
+            chrome.alarms.create(ALARM_NAMES.WORKBOOK_SYNC, { periodInMinutes: syncInterval });
+            console.log(`${LOG} Workbook sync alarm restored (${syncInterval} min)`);
+        }
+    } catch (e) {
+        console.warn(`${LOG} onStartup workbook alarm restore failed:`, e?.message || e);
+    }
+});
+
+// ============================================================
 // SCHEDULED EXECUTION
 // ============================================================
 async function executeScheduledRun(schedule) {
@@ -363,8 +424,9 @@ async function executeScheduledRun(schedule) {
             throw new Error('No input sheet configured');
         }
         
-        // Read searches from input sheet
-        const searchData = await readSheet(inputSheetId, 'Sheet1!A:C');
+        // Read searches from input sheet (prefer Searches tab, fallback to Sheet1)
+        const searchData = await readSheet(inputSheetId, "'Searches'!A:C")
+            .catch(() => readSheet(inputSheetId, 'Sheet1!A:C'));
         let searches = searchData.slice(1) // Skip header
             .filter(row => row[0] === schedule.sourceName)
             .map(row => ({
@@ -1206,7 +1268,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         break;
                     }
                     
-                    const data = await readSheet(inputSheetId, 'Sheet1!A:C');
+                    const data = await readSheet(inputSheetId, "'Searches'!A:C")
+                        .catch(() => readSheet(inputSheetId, 'Sheet1!A:C'));
                     const searches = data.slice(1).map(row => ({
                         source: row[0],
                         title: row[1],
@@ -1244,6 +1307,68 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     response = result;
                     break;
                 }
+
+                // --- LIVE WORKBOOK SYNC ---
+                case MESSAGE_ACTIONS.GET_WORKBOOK_CONFIG: {
+                    const stored = await getFromStorage([STORAGE_KEYS.WORKBOOK_CONFIG, STORAGE_KEYS.LAST_SYNC_CHANGES]);
+                    response = {
+                        success: true,
+                        config: stored[STORAGE_KEYS.WORKBOOK_CONFIG] || null,
+                        lastChanges: stored[STORAGE_KEYS.LAST_SYNC_CHANGES] || null
+                    };
+                    break;
+                }
+
+                case MESSAGE_ACTIONS.LOAD_WORKBOOK: {
+                    const workbookUrl = message.workbookUrl;
+                    if (!workbookUrl) throw new Error('Missing workbookUrl');
+
+                    const config = await loadWorkbookConfig(workbookUrl);
+
+                    // Create/refresh alarm AFTER successful load
+                    const syncInterval = await getSyncInterval();
+                    chrome.alarms.create(ALARM_NAMES.WORKBOOK_SYNC, { periodInMinutes: syncInterval });
+
+                    const stored = await getFromStorage([STORAGE_KEYS.LAST_SYNC_CHANGES]);
+                    response = { success: true, config, changes: stored[STORAGE_KEYS.LAST_SYNC_CHANGES] || null };
+                    break;
+                }
+
+                case MESSAGE_ACTIONS.SYNC_WORKBOOK: {
+                    const result = await syncWorkbookConfig();
+                    if (result?.synced === false && result?.error) throw new Error(result.error);
+                    response = { success: true, ...result };
+                    break;
+                }
+
+                case MESSAGE_ACTIONS.CLEAR_WORKBOOK: {
+                    await clearWorkbookConfig();
+                    chrome.alarms.clear(ALARM_NAMES.WORKBOOK_SYNC);
+                    response = { success: true };
+                    break;
+                }
+
+                case MESSAGE_ACTIONS.SET_SYNC_INTERVAL: {
+                    const minutes = Number(message.minutes);
+                    if (!Number.isFinite(minutes)) throw new Error('Invalid minutes');
+
+                    const newInterval = await setSyncInterval(minutes);
+
+                    // If workbook configured, recreate alarm at new interval
+                    const cfg = await getWorkbookConfig();
+                    if (cfg?.workbookId) {
+                        chrome.alarms.create(ALARM_NAMES.WORKBOOK_SYNC, { periodInMinutes: newInterval });
+                    }
+
+                    response = { success: true, minutes: newInterval };
+                    break;
+                }
+
+                case MESSAGE_ACTIONS.GET_SYNC_STATUS: {
+                    const cfg = await getWorkbookConfig();
+                    response = { success: true, status: cfg?.syncStatus || 'none' };
+                    break;
+                }
                 
                 // --- WORKBOOKS ---
                 case MESSAGE_ACTIONS.ADD_WORKBOOK: {
@@ -1266,7 +1391,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     
                     workbooks.push({
                         id: sheetId,
+                        // Keep legacy "name" for existing UI paths, but also store Live Sync shape
                         name: validation.title,
+                        title: validation.title,
+                        url: `https://docs.google.com/spreadsheets/d/${sheetId}`,
                         addedAt: new Date().toISOString()
                     });
                     
@@ -1590,6 +1718,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // Start background processors
         startQueueProcessor();
         startScheduleChecker();
+
+        // Live Sync: restore alarm if workbook configured
+        const storedSync = await getFromStorage([STORAGE_KEYS.WORKBOOK_CONFIG, STORAGE_KEYS.SYNC_INTERVAL_MINUTES]);
+        const cfg = storedSync[STORAGE_KEYS.WORKBOOK_CONFIG];
+        const interval = storedSync[STORAGE_KEYS.SYNC_INTERVAL_MINUTES] || 5;
+        if (cfg?.workbookId) {
+            chrome.alarms.create(ALARM_NAMES.WORKBOOK_SYNC, { periodInMinutes: interval });
+            console.log(`${LOG} Workbook sync alarm restored from init (${interval} min)`);
+        }
 
         // Startup auth checks (non-interactive)
         performStartupAuthChecks().catch(() => {});

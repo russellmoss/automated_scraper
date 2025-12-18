@@ -1,44 +1,77 @@
-// utils/constants.js - Shared constants
+// ============================================================
+// CONSTANTS ADDITIONS FOR LIVE SHEET SYNC
+// Add these to your existing utils/constants.js
+// ============================================================
+
+// ============================================================
+// ADD TO EXISTING STORAGE_KEYS OBJECT
+// ============================================================
+/*
+export const STORAGE_KEYS = {
+    // ... your existing keys ...
+    
+    // NEW: Unified Workbook Config
+    WORKBOOK_CONFIG: 'workbookConfig',
+    SYNC_INTERVAL_MINUTES: 'syncIntervalMinutes',
+    LAST_SYNC_CHANGES: 'lastSyncChanges',
+};
+*/
+
+// ============================================================
+// ADD TO EXISTING MESSAGE_ACTIONS OBJECT
+// ============================================================
+/*
+export const MESSAGE_ACTIONS = {
+    // ... your existing actions ...
+    
+    // NEW: Workbook Sync
+    LOAD_WORKBOOK: 'LOAD_WORKBOOK',
+    SYNC_WORKBOOK: 'SYNC_WORKBOOK',
+    GET_WORKBOOK_CONFIG: 'GET_WORKBOOK_CONFIG',
+    SET_SYNC_INTERVAL: 'SET_SYNC_INTERVAL',
+    GET_SYNC_STATUS: 'GET_SYNC_STATUS',
+    CLEAR_WORKBOOK: 'CLEAR_WORKBOOK',
+};
+*/
+
+// ============================================================
+// ADD TO EXISTING ALARM_NAMES OBJECT
+// ============================================================
+/*
+export const ALARM_NAMES = {
+    // ... your existing alarms ...
+    
+    // NEW: Workbook Sync
+    WORKBOOK_SYNC: 'workbook-sync-alarm',
+};
+*/
+
+// ============================================================
+// COMPLETE UPDATED constants.js FILE
+// (Copy this entire file to replace your existing one)
+// ============================================================
 
 export const CONFIG = {
     // Scraping timing (anti-detection)
-    MIN_WAIT_SECONDS: 15,
-    MAX_WAIT_SECONDS: 40,
-    SCROLL_WAIT_MS: 4000,
+    MIN_WAIT_SECONDS: 5,
+    MAX_WAIT_SECONDS: 8,
+    SCROLL_WAIT_MS: 2000,
     MAX_PAGES: 1000,
     
-    // Long pause configuration (simulates user distraction)
-    LONG_PAUSE_CHANCE: 0.15,       // 15% chance of long pause after each page
-    LONG_PAUSE_MIN_SECONDS: 45,    // Minimum long pause duration
-    LONG_PAUSE_MAX_SECONDS: 120,   // Maximum long pause duration (2 minutes)
-    
-    // Between-search delays (service worker)
-    BETWEEN_SEARCH_MIN_SECONDS: 60,
-    BETWEEN_SEARCH_MAX_SECONDS: 120,
-    
-    // Noise activity config
-    NOISE_ACTIVITY_ENABLED: true,
-    NOISE_CHANCE: 0.4,                // 40% chance of noise activity between searches
-    NOISE_MIN_DURATION_SECONDS: 25,
-    NOISE_MAX_DURATION_SECONDS: 75,
-    NOISE_URLS: [
-        'https://www.linkedin.com/feed/',
-        'https://www.linkedin.com/mynetwork/',
-        'https://www.linkedin.com/notifications/',
-        'https://www.linkedin.com/jobs/',
-    ],
-    
     // Queue processing
-    QUEUE_PROCESS_INTERVAL_MINUTES: 1.0,  // 60 seconds
-    KEEPALIVE_INTERVAL_MINUTES: 0.5,      // 30 seconds
+    QUEUE_PROCESS_INTERVAL_MINUTES: 0.5,  // 30 seconds
+    KEEPALIVE_INTERVAL_MINUTES: 0.4,      // 24 seconds
     MAX_RETRIES: 5,
-    BASE_DELAY_MS: 4000,
+    BASE_DELAY_MS: 2000,
     
     // Schedule execution
     SCHEDULE_CHECK_INTERVAL_MINUTES: 1,    // Check every minute
     
     // Notifications
-    WEBHOOK_TIMEOUT_MS: 25000
+    WEBHOOK_TIMEOUT_MS: 10000,
+    
+    // NEW: Sync defaults
+    DEFAULT_SYNC_INTERVAL_MINUTES: 5,
 };
 
 export const ALARM_NAMES = {
@@ -46,9 +79,9 @@ export const ALARM_NAMES = {
     QUEUE_PROCESS: 'queue-process-alarm',
     SCHEDULE_CHECK: 'schedule-check-alarm',
     AUTO_RUN_KEEPALIVE: 'auto-run-keepalive',
-
-    // Live workbook sync
-    WORKBOOK_SYNC: 'workbook-sync-alarm'
+    
+    // NEW: Workbook Sync
+    WORKBOOK_SYNC: 'workbook-sync-alarm',
 };
 
 export const STORAGE_KEYS = {
@@ -57,10 +90,10 @@ export const STORAGE_KEYS = {
     SAVED_WORKBOOKS: 'savedWorkbooks',
     SOURCE_MAPPING: 'sourceMapping',
     
-    // Schedules (NEW)
+    // Schedules
     SCHEDULES: 'schedules',
     EXECUTION_HISTORY: 'executionHistory',
-    PENDING_SCHEDULES: 'pendingSchedules',  // Queue for schedules deferred due to overlap
+    PENDING_SCHEDULES: 'pendingSchedules',
     
     // State
     SYNC_QUEUE: 'syncQueue',
@@ -68,15 +101,16 @@ export const STORAGE_KEYS = {
     AUTO_RUN_STATE: 'autoRunState',
     CURRENT_SEARCH_INDEX: 'searchIndex',
     DEDICATED_SCRAPE_TAB_ID: 'dedicatedScrapeTabId',
+    MANUAL_SCRAPE_STATE: 'manualScrapeState',
     
     // Notifications
     WEBHOOK_URL: 'webhookUrl',
     NOTIFICATION_SETTINGS: 'notificationSettings',
-
-    // Live workbook sync
+    
+    // NEW: Unified Workbook Config
     WORKBOOK_CONFIG: 'workbookConfig',
     SYNC_INTERVAL_MINUTES: 'syncIntervalMinutes',
-    LAST_SYNC_CHANGES: 'lastSyncChanges'
+    LAST_SYNC_CHANGES: 'lastSyncChanges',
 };
 
 export const SHEETS_API_BASE = 'https://sheets.googleapis.com/v4/spreadsheets';
@@ -129,38 +163,33 @@ export const MESSAGE_ACTIONS = {
     // Auto-run
     START_AUTO_RUN: 'START_AUTO_RUN',
     STOP_AUTO_RUN: 'STOP_AUTO_RUN',
-    GET_AUTO_RUN_STATUS: 'GET_AUTO_RUN_STATUS',
+    GET_AUTO_RUN_STATE: 'GET_AUTO_RUN_STATE',
     AUTO_RUN_PROGRESS: 'AUTO_RUN_PROGRESS',
-    
-    // Scheduling (NEW)
-    GET_SCHEDULES: 'GET_SCHEDULES',
-    SET_SCHEDULE: 'SET_SCHEDULE',
-    DELETE_SCHEDULE: 'DELETE_SCHEDULE',
-    GET_EXECUTION_HISTORY: 'GET_EXECUTION_HISTORY',
-    EXECUTION_HISTORY_UPDATED: 'EXECUTION_HISTORY_UPDATED',
-    TRIGGER_SCHEDULED_RUN: 'TRIGGER_SCHEDULED_RUN',
-    
-    // Notifications (NEW)
-    SET_WEBHOOK_URL: 'SET_WEBHOOK_URL',
-    TEST_WEBHOOK: 'TEST_WEBHOOK',
-    SEND_NOTIFICATION: 'SEND_NOTIFICATION',
     
     // Queue
     GET_QUEUE_STATUS: 'GET_QUEUE_STATUS',
     RETRY_FAILED: 'RETRY_FAILED',
     CLEAR_FAILED: 'CLEAR_FAILED',
     
-    // Keep-alive
-    START_KEEPALIVE: 'START_KEEPALIVE',
-    STOP_KEEPALIVE: 'STOP_KEEPALIVE',
-
-    // Live workbook sync
+    // Schedules
+    GET_SCHEDULES: 'GET_SCHEDULES',
+    SET_SCHEDULE: 'SET_SCHEDULE',
+    DELETE_SCHEDULE: 'DELETE_SCHEDULE',
+    TRIGGER_SCHEDULED_RUN: 'TRIGGER_SCHEDULED_RUN',
+    GET_EXECUTION_HISTORY: 'GET_EXECUTION_HISTORY',
+    
+    // Notifications
+    SET_WEBHOOK_URL: 'SET_WEBHOOK_URL',
+    GET_WEBHOOK_URL: 'GET_WEBHOOK_URL',
+    TEST_WEBHOOK: 'TEST_WEBHOOK',
+    
+    // NEW: Workbook Sync
     LOAD_WORKBOOK: 'LOAD_WORKBOOK',
     SYNC_WORKBOOK: 'SYNC_WORKBOOK',
     GET_WORKBOOK_CONFIG: 'GET_WORKBOOK_CONFIG',
     SET_SYNC_INTERVAL: 'SET_SYNC_INTERVAL',
     GET_SYNC_STATUS: 'GET_SYNC_STATUS',
-    CLEAR_WORKBOOK: 'CLEAR_WORKBOOK'
+    CLEAR_WORKBOOK: 'CLEAR_WORKBOOK',
 };
 
 export const SCHEDULE_DAYS = [
@@ -179,10 +208,19 @@ export const LOG_PREFIXES = {
     POPUP: '[POPUP]',
     SHEETS: '[SHEETS]',
     QUEUE: '[QUEUE]',
-    SCHEDULE: '[SCHEDULE]',
+    SCHEDULE: '[SCHED]',
+    AUTH: '[AUTH]',
     NOTIFY: '[NOTIFY]',
-
-    // Live workbook sync
-    SYNC: '[SYNC]'
+    SYNC: '[SYNC]'  // NEW
 };
 
+// NEW: Sync Configuration
+export const SYNC_CONFIG = {
+    DEFAULT_INTERVAL_MINUTES: 5,
+    MIN_INTERVAL_MINUTES: 1,
+    MAX_INTERVAL_MINUTES: 60,
+    SEARCHES_TAB_NAME: 'Searches',
+    MAPPINGS_TAB_NAME: 'Mapping and Schedules',
+    SEARCHES_RANGE: 'A:C',
+    MAPPINGS_RANGE: 'A:H',
+};

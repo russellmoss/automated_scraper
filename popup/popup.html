@@ -18,21 +18,37 @@
     </header>
     
     <main class="main-content">
-        <!-- SECTION: Input Sheet -->
-        <section class="section" id="section-input">
-            <div class="section-header" data-section="input">
-                <span>📋 Input Sheet</span>
+        <!-- SECTION: Workbook Configuration (Live Sync) -->
+        <section class="section" id="section-workbook-config">
+            <div class="section-header" data-section="workbook-config">
+                <span>📘 Workbook Configuration (Live Sync)</span>
                 <span class="chevron">▼</span>
             </div>
             <div class="section-content">
                 <div class="input-group">
-                    <input type="text" id="input-sheet-url" name="input-sheet-url" placeholder="Google Sheet URL or ID">
-                    <button id="load-sheet-btn" class="btn btn-primary">Load</button>
+                    <input type="text" id="workbook-url" name="workbook-url" placeholder="Master workbook URL or ID">
+                    <button id="load-workbook-btn" class="btn btn-primary">Load</button>
                 </div>
-                <div id="input-sheet-info" class="info-box hidden">
-                    <a id="input-sheet-link" href="#" target="_blank"></a>
-                    <span id="search-count"></span>
+
+                <div class="input-group">
+                    <button id="sync-workbook-btn" class="btn btn-secondary">Sync Now</button>
+                    <button id="clear-workbook-btn" class="btn btn-outline">Clear</button>
                 </div>
+
+                <div class="input-group">
+                    <label for="sync-interval-select">Sync interval</label>
+                    <select id="sync-interval-select" name="sync-interval-select">
+                        <option value="1">1 min</option>
+                        <option value="5" selected>5 min</option>
+                        <option value="10">10 min</option>
+                        <option value="15">15 min</option>
+                        <option value="30">30 min</option>
+                        <option value="60">60 min</option>
+                    </select>
+                </div>
+
+                <div id="sync-status-container" class="info-box hidden"></div>
+                <div id="sync-changes-container" class="results-box hidden"></div>
             </div>
         </section>
         

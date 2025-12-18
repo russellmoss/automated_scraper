@@ -41,6 +41,7 @@ LinkedIn competitive intelligence Chrome extension - scrape and track competitor
 
 - 🔍 **Automated LinkedIn Scraping** - Multi-layer extraction strategy resilient to LinkedIn DOM changes
 - 📊 **Google Sheets Integration** - Automatic data sync to Google Sheets with weekly tab management
+- 📘 **Savvy Pirate Command Center (Live Sync Workbook)** - One master workbook drives Searches, Mappings, and Schedules with live sync
 - ⏰ **Scheduled Scraping** - Per-source scheduling with automated execution
 - 🔔 **Zapier Webhooks** - Real-time notifications for scraping events with category filtering
 - 📈 **Tab Comparison** - Find new entries between different date tabs
@@ -101,9 +102,111 @@ LinkedIn Page → Content Script → Service Worker → Queue → Google Sheets 
 
 - **Per-Source**: Each source (Connection) can have its own schedule
 - **Weekly**: Schedules run once per week on specified day/time
+- **Biweekly (optional)**: “1st & 3rd week of month” (odd) or “2nd & 4th week of month” (even)
 - **Eastern Time**: All schedules use Eastern Time (America/New_York)
 - **Automatic**: Service worker checks schedules every minute
 - **Execution Records**: Each scheduled run creates an execution record
+
+### Savvy Pirate Command Center (Live Sync Workbook)
+
+The **Savvy Pirate Command Center** is a single “master” Google Sheet workbook that becomes the **system of record** for:
+- Searches to scrape
+- Which output workbook each person/source maps to
+- Per-person schedules (day/time/frequency)
+
+#### Workbook tabs (MUST be named exactly)
+
+- **`Searches`**
+- **`Mapping and Schedules`**
+
+> The extension can still fall back to `Sheet1!A:C` for legacy setups, but the intended setup is `Searches`.
+
+#### Tab 1: `Searches` (columns A:C)
+
+Each row defines one LinkedIn search to run:
+
+- **Column A — Source Connection**: The person/source name (ex: `Jeff Nash`)
+- **Column B — Target Job Title**: Display label for the search (ex: `Financial Advisor`)
+- **Column C — LinkedIn Search URL**: The exact LinkedIn people search URL to scrape
+
+#### Tab 2: `Mapping and Schedules` (columns A:H)
+
+Each row defines the output workbook + schedule settings for a person/source:
+
+- **Column A — Name**: The person/source name (ex: `Jeff Nash`)
+- **Column B — Sheet_URL**: The **output workbook** URL (recommended: full Google Sheets URL)
+- **Column C — Title**: A role/title field for your own reference (ex: `CEO & Co-Founder`)
+- **Column D — Company**: Optional reference
+- **Column E — Day**: Optional reference text
+- **Column F — Day of Week**: Use the sheet dropdown (Sunday–Saturday)
+- **Column G — Time (24hr)**: **24-hour format**, ex: `08:30`, `14:05`, `23:45`
+- **Column H — Frequency**: Use the sheet dropdown:
+  - `Every week`
+  - `1st & 3rd week of month`
+  - `2nd & 4th week of month`
+
+#### Critical rule: Name matching must be EXACT
+
+The extension joins these tabs by **exact string match**:
+- `Searches!A (Source Connection)` **must match exactly** `Mapping and Schedules!A (Name)`
+
+If they don’t match (extra spaces, different capitalization, suffix differences), the person will appear as **unmapped** or **unscheduled**.
+
+#### Scheduling time zone (EST/ET)
+
+All schedule execution is computed in **Eastern Time** (`America/New_York`).
+So the “Time (24hr)” you enter is interpreted as **ET/EST**.
+
+#### How to use Live Sync in the extension
+
+In the side panel popup, use **📘 Workbook Configuration (Live Sync)**:
+
+- **Load**: Validates workbook access, reads both tabs, builds `workbookConfig`, and updates:
+  - `inputSheetId` (master workbook ID)
+  - `sourceMapping` (Name → output workbook ID)
+  - `savedWorkbooks` (output workbooks list)
+  - `schedules` (created/updated via scheduler)
+
+- **Sync Now**: Re-reads the workbook, diffs changes, and applies updates (same targets as Load)
+
+- **Sync interval**: Controls the background sync alarm (periodic polling). The extension will sync automatically at this interval (skips syncing while a scrape is actively running).
+
+- **Clear**: Clears the stored `workbookConfig` and sync change list (does not delete your Google Sheets).
+
+#### Troubleshooting Live Sync
+
+- **Sync Now shows no changes / does nothing**
+  - Confirm you clicked **Load** at least once (Load creates `workbookConfig`)
+  - Confirm no scrape is running (sync is skipped while scraping is active)
+  - Open the service worker console and check:
+    - `chrome.storage.local.get(['workbookConfig','lastSyncChanges'], console.log)`
+
+- **A person shows as unmapped / unscheduled**
+  - Ensure exact name match:
+    - `Searches!A (Source Connection)` must match `Mapping and Schedules!A (Name)` **exactly**
+    - Watch for trailing spaces, different capitalization, “Jr.” vs no suffix, etc.
+
+- **Sheet_URL mapping doesn’t work**
+  - `Mapping and Schedules!B (Sheet_URL)` should be a full Google Sheets URL (recommended)
+  - If you paste an ID instead, ensure it’s the raw spreadsheet ID (no extra characters)
+
+- **Workbook name displays incorrectly**
+  - The “Title” column (Mapping and Schedules column C) is **NOT** the workbook name (it’s a role like “CEO & Co-Founder”)
+  - The extension attempts to fetch the real output workbook title via the Sheets API
+  - If the output workbook isn’t shared with the same Google account used for OAuth, the extension can’t read its title
+
+- **Schedules not running when expected**
+  - Time must be **24-hour format** in `Mapping and Schedules!G` (ex: `08:30`, `14:05`)
+  - Schedules run in **Eastern Time** (`America/New_York`)
+  - Frequency must match dropdown labels exactly:
+    - `Every week`
+    - `1st & 3rd week of month`
+    - `2nd & 4th week of month`
+
+- **OAuth / Google login prompts or errors**
+  - Chromium/Raspberry Pi requires a **Web application** OAuth client and an authorized redirect URI:
+    - `https://<EXTENSION_ID>.chromiumapp.org/`
+  - If you get `redirect_uri_mismatch`, add the current extension ID’s redirect URI to Google Cloud and reload the extension
 
 ### Webhook Notifications
 

@@ -258,6 +258,18 @@ label {
 }
 
 /* ============================================================
+   LIVE WORKBOOK SYNC
+   ============================================================ */
+.sync-status-success { border-left: 4px solid var(--accent-green); }
+.sync-status-error { border-left: 4px solid var(--accent-red); }
+.sync-status-syncing { border-left: 4px solid var(--accent-gold); }
+
+#sync-changes-container {
+    max-height: 140px;
+    overflow-y: auto;
+}
+
+/* ============================================================
    INFO & RESULTS BOXES
    ============================================================ */
 .info-box {

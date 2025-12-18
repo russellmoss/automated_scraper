@@ -13,6 +13,8 @@ const elements = {};
 let state = {
     inputSheetId: null,
     inputSheetTitle: null,
+    workbookConfig: null,
+    lastSyncChanges: null,
     searches: [],
     workbooks: [],
     sourceMapping: {},
@@ -102,6 +104,11 @@ function formatDuration(ms) {
     return `${minutes}m ${remainingSeconds}s`;
 }
 
+function getWorkbookLabel(w) {
+    if (!w) return '';
+    return w.title || w.name || w.id;
+}
+
 /**
  * Show toast notification
  */
@@ -141,6 +148,121 @@ function setButtonLoading(btn, loading) {
     }
 }
 
+function renderSyncStatus(config) {
+    if (!elements.syncStatusContainer) return;
+
+    if (!config) {
+        elements.syncStatusContainer.classList.add('hidden');
+        elements.syncStatusContainer.textContent = '';
+        elements.syncStatusContainer.classList.remove('sync-status-success', 'sync-status-error', 'sync-status-syncing');
+        return;
+    }
+
+    const status = config.syncStatus || 'unknown';
+    elements.syncStatusContainer.classList.remove('hidden');
+    elements.syncStatusContainer.classList.remove('sync-status-success', 'sync-status-error', 'sync-status-syncing');
+
+    if (status === 'success') elements.syncStatusContainer.classList.add('sync-status-success');
+    if (status === 'error') elements.syncStatusContainer.classList.add('sync-status-error');
+    if (status === 'syncing') elements.syncStatusContainer.classList.add('sync-status-syncing');
+
+    const title = config.workbookTitle || 'Untitled';
+    const lastSync = config.lastSync ? formatDate(config.lastSync) : '-';
+    const err = config.lastSyncError ? ` • Error: ${config.lastSyncError}` : '';
+
+    elements.syncStatusContainer.textContent = `${title} • Status: ${status} • Last sync: ${lastSync}${err}`;
+}
+
+function renderSyncChanges(changes) {
+    if (!elements.syncChangesContainer) return;
+
+    if (!changes || changes.length === 0) {
+        elements.syncChangesContainer.classList.add('hidden');
+        elements.syncChangesContainer.textContent = '';
+        return;
+    }
+
+    elements.syncChangesContainer.classList.remove('hidden');
+    elements.syncChangesContainer.innerHTML = changes
+        .map(c => `<div>${c.message || JSON.stringify(c)}</div>`)
+        .join('');
+}
+
+async function loadWorkbookConfigFromPopup() {
+    const url = elements.workbookUrl?.value?.trim();
+    if (!url) return showToast('Please enter a workbook URL or ID', 'error');
+
+    setButtonLoading(elements.loadWorkbookBtn, true);
+    try {
+        const r = await sendMessage('LOAD_WORKBOOK', { workbookUrl: url });
+        state.workbookConfig = r.config || null;
+        state.lastSyncChanges = r.changes || null;
+        renderSyncStatus(state.workbookConfig);
+        renderSyncChanges(state.lastSyncChanges);
+        showToast('Workbook loaded', 'success');
+
+        await loadInitialData();
+    } catch (e) {
+        showToast(e.message, 'error');
+    } finally {
+        setButtonLoading(elements.loadWorkbookBtn, false);
+    }
+}
+
+async function syncWorkbookNowFromPopup() {
+    setButtonLoading(elements.syncWorkbookBtn, true);
+    try {
+        const r = await sendMessage('SYNC_WORKBOOK');
+        if (r && r.synced === false) {
+            if (r.reason === 'no_workbook') {
+                showToast('No workbook configured. Click Load first.', 'error');
+                return;
+            }
+            if (r.error) {
+                showToast(r.error, 'error');
+                return;
+            }
+        }
+        state.workbookConfig = r.config || state.workbookConfig;
+        state.lastSyncChanges = r.changes || null;
+        renderSyncStatus(state.workbookConfig);
+        renderSyncChanges(state.lastSyncChanges);
+        showToast('Sync complete', 'success');
+
+        await loadInitialData();
+    } catch (e) {
+        showToast(e.message, 'error');
+    } finally {
+        setButtonLoading(elements.syncWorkbookBtn, false);
+    }
+}
+
+async function clearWorkbookFromPopup() {
+    setButtonLoading(elements.clearWorkbookBtn, true);
+    try {
+        await sendMessage('CLEAR_WORKBOOK');
+        state.workbookConfig = null;
+        state.lastSyncChanges = null;
+        renderSyncStatus(null);
+        renderSyncChanges(null);
+        showToast('Workbook cleared', 'success');
+    } catch (e) {
+        showToast(e.message, 'error');
+    } finally {
+        setButtonLoading(elements.clearWorkbookBtn, false);
+    }
+}
+
+async function onSyncIntervalChange() {
+    const minutes = Number(elements.syncIntervalSelect.value);
+    try {
+        const r = await sendMessage('SET_SYNC_INTERVAL', { minutes });
+        showToast(`Sync interval set to ${r.minutes} min`, 'success');
+    } catch (e) {
+        showToast(e.message, 'error');
+    }
+}
+
 // ============================================================
 // INITIALIZATION
 // ============================================================
@@ -163,13 +285,28 @@ document.addEventListener('DOMContentLoaded', async () => {
     console.log(`${LOG} Popup initialized`);
 });
 
+chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== 'local') return;
+
+    if (changes.workbookConfig) {
+        state.workbookConfig = changes.workbookConfig.newValue || null;
+        renderSyncStatus(state.workbookConfig);
+    }
+    if (changes.lastSyncChanges) {
+        state.lastSyncChanges = changes.lastSyncChanges.newValue || null;
+        renderSyncChanges(state.lastSyncChanges);
+    }
+});
+
 function cacheElements() {
-    // Input Sheet
-    elements.inputSheetUrl = document.getElementById('input-sheet-url');
-    elements.loadSheetBtn = document.getElementById('load-sheet-btn');
-    elements.inputSheetInfo = document.getElementById('input-sheet-info');
-    elements.inputSheetLink = document.getElementById('input-sheet-link');
-    elements.searchCount = document.getElementById('search-count');
+    // Live Sync (Workbook Config)
+    elements.workbookUrl = document.getElementById('workbook-url');
+    elements.loadWorkbookBtn = document.getElementById('load-workbook-btn');
+    elements.syncWorkbookBtn = document.getElementById('sync-workbook-btn');
+    elements.clearWorkbookBtn = document.getElementById('clear-workbook-btn');
+    elements.syncIntervalSelect = document.getElementById('sync-interval-select');
+    elements.syncStatusContainer = document.getElementById('sync-status-container');
+    elements.syncChangesContainer = document.getElementById('sync-changes-container');
     
     // Mappings
     elements.mappingList = document.getElementById('mapping-list');
@@ -290,22 +427,31 @@ function syncDropdownsToTimeInput() {
 
 async function loadInitialData() {
     try {
-        // Load saved input sheet ID and display it
-        const inputSheetResult = await sendMessage('GET_INPUT_SHEET_INFO').catch(() => ({ sheetId: null, title: null }));
-        if (inputSheetResult.sheetId) {
-            state.inputSheetId = inputSheetResult.sheetId;
-            state.inputSheetTitle = inputSheetResult.title;
-            elements.inputSheetUrl.value = `https://docs.google.com/spreadsheets/d/${inputSheetResult.sheetId}`;
-            elements.inputSheetInfo.classList.remove('hidden');
-            elements.inputSheetLink.href = `https://docs.google.com/spreadsheets/d/${inputSheetResult.sheetId}`;
-            if (inputSheetResult.title) {
-                elements.inputSheetLink.textContent = inputSheetResult.title;
-            }
-        }
+        // Live Sync: load workbook config + last changes (non-fatal)
+        const cfg = await sendMessage('GET_WORKBOOK_CONFIG').catch(() => ({ config: null, lastChanges: null }));
+        state.workbookConfig = cfg.config || null;
+        state.lastSyncChanges = cfg.lastChanges || null;
+        renderSyncStatus(state.workbookConfig);
+        renderSyncChanges(state.lastSyncChanges);
         
         // Load searches
         const searchResult = await sendMessage('GET_SEARCHES').catch(() => ({ searches: [] }));
         state.searches = searchResult.searches || [];
+
+        // If workbook configured, populate input field
+        if (state.workbookConfig?.workbookUrl && elements.workbookUrl) {
+            elements.workbookUrl.value = state.workbookConfig.workbookUrl;
+        } else if (elements.workbookUrl && !elements.workbookUrl.value) {
+            // Fallback: if workbookConfig is missing but legacy inputSheetId exists, show it.
+            try {
+                const stored = await chrome.storage.local.get(['inputSheetId']);
+                if (stored.inputSheetId) {
+                    elements.workbookUrl.value = `https://docs.google.com/spreadsheets/d/${stored.inputSheetId}`;
+                }
+            } catch (e) {
+                // ignore
+            }
+        }
         
         // Load workbooks
         const workbookResult = await sendMessage('GET_WORKBOOKS');
@@ -331,12 +477,6 @@ async function loadInitialData() {
         renderScheduleList();
         renderWorkbookDropdowns();
         
-        // Update search count
-        if (state.searches.length > 0) {
-            elements.inputSheetInfo.classList.remove('hidden');
-            elements.searchCount.textContent = `${state.searches.length} searches loaded`;
-        }
-        
     } catch (error) {
         console.error(`${LOG} Error loading data:`, error);
         showToast('Error loading data', 'error');
@@ -356,8 +496,11 @@ function setupEventListeners() {
         });
     });
     
-    // Input Sheet
-    elements.loadSheetBtn.addEventListener('click', loadInputSheet);
+    // Live Sync (Workbook Config)
+    elements.loadWorkbookBtn.addEventListener('click', loadWorkbookConfigFromPopup);
+    elements.syncWorkbookBtn.addEventListener('click', syncWorkbookNowFromPopup);
+    elements.clearWorkbookBtn.addEventListener('click', clearWorkbookFromPopup);
+    elements.syncIntervalSelect.addEventListener('change', onSyncIntervalChange);
     
     // Workbooks
     elements.addWorkbookBtn.addEventListener('click', openWorkbookModal);
@@ -429,6 +572,12 @@ function populateScheduleTestSearchDropdown(sourceName) {
 // ============================================================
 
 async function loadInputSheet() {
+    // Legacy flow retained for reference; Input Sheet UI was removed in Live Sync.
+    if (!elements.inputSheetUrl) {
+        showToast('Input Sheet UI is disabled (use Workbook Configuration)', 'error');
+        return;
+    }
+
     const url = elements.inputSheetUrl.value.trim();
     if (!url) {
         showToast('Please enter a Sheet URL or ID', 'error');
@@ -441,7 +590,7 @@ async function loadInputSheet() {
         return;
     }
     
-    setButtonLoading(elements.loadSheetBtn, true);
+    if (elements.loadSheetBtn) setButtonLoading(elements.loadSheetBtn, true);
     
     try {
         const result = await sendMessage('LOAD_INPUT_SHEET', { sheetId });
@@ -450,17 +599,19 @@ async function loadInputSheet() {
         state.inputSheetTitle = result.title;
         
         // Persist URL in input field
-        elements.inputSheetUrl.value = url;
+        if (elements.inputSheetUrl) elements.inputSheetUrl.value = url;
         
         // Load searches
         const searchResult = await sendMessage('GET_SEARCHES');
         state.searches = searchResult.searches || [];
         
-        // Update UI
-        elements.inputSheetInfo.classList.remove('hidden');
-        elements.inputSheetLink.href = `https://docs.google.com/spreadsheets/d/${sheetId}`;
-        elements.inputSheetLink.textContent = result.title;
-        elements.searchCount.textContent = `${state.searches.length} searches`;
+        // Update UI (if legacy elements exist)
+        if (elements.inputSheetInfo) elements.inputSheetInfo.classList.remove('hidden');
+        if (elements.inputSheetLink) {
+            elements.inputSheetLink.href = `https://docs.google.com/spreadsheets/d/${sheetId}`;
+            elements.inputSheetLink.textContent = result.title;
+        }
+        if (elements.searchCount) elements.searchCount.textContent = `${state.searches.length} searches`;
         
         // Update dropdowns
         renderSourceDropdown();
@@ -470,7 +621,7 @@ async function loadInputSheet() {
     } catch (error) {
         showToast(error.message, 'error');
     } finally {
-        setButtonLoading(elements.loadSheetBtn, false);
+        if (elements.loadSheetBtn) setButtonLoading(elements.loadSheetBtn, false);
     }
 }
 
@@ -523,12 +674,12 @@ function renderWorkbookMappings() {
         item.innerHTML = `
             <span class="mapping-source">${source}</span>
             <span class="mapping-arrow">→</span>
-            <span class="mapping-workbook">${workbook ? workbook.name : 'Not mapped'}</span>
+            <span class="mapping-workbook">${workbook ? getWorkbookLabel(workbook) : 'Not mapped'}</span>
             <select class="mapping-select" data-source="${source}">
                 <option value="">Select workbook...</option>
                 ${state.workbooks.map(w => `
                     <option value="${w.id}" ${w.id === workbookId ? 'selected' : ''}>
-                        ${w.name}
+                        ${getWorkbookLabel(w)}
                     </option>
                 `).join('')}
             </select>
@@ -617,8 +768,8 @@ function renderScheduleList() {
 }
 
 function renderWorkbookDropdowns() {
-    const options = state.workbooks.map(w => 
-        `<option value="${w.id}">${w.name}</option>`
+    const options = state.workbooks.map(w =>
+        `<option value="${w.id}">${getWorkbookLabel(w)}</option>`
     ).join('');
     
     elements.compareWorkbookSelect.innerHTML = `

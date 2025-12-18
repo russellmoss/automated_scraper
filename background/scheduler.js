@@ -216,7 +216,8 @@ export async function setSchedule(scheduleData) {
             : null;
 
         schedule = {
-            id: generateId(),
+            // Allow callers to supply a stable ID (required for workbook-managed schedules)
+            id: scheduleData.id || generateId(),
             sourceName: scheduleData.sourceName,
             dayOfWeek: scheduleData.dayOfWeek,
             hour: scheduleData.hour,
@@ -224,6 +225,7 @@ export async function setSchedule(scheduleData) {
             frequency,
             weekPattern,
             enabled: scheduleData.enabled !== false,
+            managedBy: scheduleData.managedBy || null,
             // Optional test-mode fields (for fast overlap testing)
             testEnabled: scheduleData.testEnabled === true,
             testSearchUrl: scheduleData.testSearchUrl || null,
