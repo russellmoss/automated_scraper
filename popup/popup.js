@@ -218,6 +218,7 @@ function cacheElements() {
     elements.modalCloseBtn = document.getElementById('modal-close-btn');
     elements.scheduleSourceSelect = document.getElementById('schedule-source-select');
     elements.scheduleDaySelect = document.getElementById('schedule-day-select');
+    elements.scheduleFrequencySelect = document.getElementById('schedule-frequency-select');
     elements.scheduleTimeInput = document.getElementById('schedule-time-input');
     elements.scheduleHourSelect = document.getElementById('schedule-hour-select');
     elements.scheduleMinuteSelect = document.getElementById('schedule-minute-select');
@@ -551,18 +552,29 @@ function renderScheduleList() {
     }
     
     const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+    function getFrequencyLabel(schedule) {
+        const freq = schedule.frequency || 'weekly';
+        if (freq === 'biweekly') {
+            if (schedule.weekPattern === 'odd') return '1st & 3rd week of month';
+            if (schedule.weekPattern === 'even') return '2nd & 4th week of month';
+            return 'Biweekly';
+        }
+        return 'Every week';
+    }
     
     state.schedules.forEach(schedule => {
         const hour = schedule.hour % 12 || 12;
         const ampm = schedule.hour < 12 ? 'AM' : 'PM';
         const minute = String(schedule.minute).padStart(2, '0');
+        const freqLabel = getFrequencyLabel(schedule);
         
         const item = document.createElement('div');
         item.className = 'schedule-item';
         item.innerHTML = `
             <div class="schedule-info" data-schedule-id="${schedule.id}" style="cursor: pointer; flex: 1;">
                 <div class="schedule-source">${schedule.sourceName}</div>
-                <div class="schedule-time">${days[schedule.dayOfWeek]} at ${hour}:${minute} ${ampm}</div>
+                <div class="schedule-time">${days[schedule.dayOfWeek]} at ${hour}:${minute} ${ampm} • ${freqLabel}</div>
             </div>
             <div class="schedule-actions">
                 <label class="toggle-switch">
@@ -850,6 +862,9 @@ function openScheduleModal(scheduleId = null) {
     // Reset form
     elements.scheduleSourceSelect.value = '';
     elements.scheduleDaySelect.value = '0';
+    if (elements.scheduleFrequencySelect) {
+        elements.scheduleFrequencySelect.value = 'weekly';
+    }
     elements.scheduleHourSelect.value = '9';
     elements.scheduleMinuteSelect.value = '0';
     syncTimeInputToDropdowns(); // Sync the time input
@@ -866,6 +881,17 @@ function openScheduleModal(scheduleId = null) {
         if (schedule) {
             elements.scheduleSourceSelect.value = schedule.sourceName;
             elements.scheduleDaySelect.value = schedule.dayOfWeek.toString();
+            if (elements.scheduleFrequencySelect) {
+                const freq = schedule.frequency || 'weekly';
+                if (freq === 'biweekly') {
+                    elements.scheduleFrequencySelect.value =
+                        schedule.weekPattern === 'odd' ? 'biweekly-odd' :
+                        schedule.weekPattern === 'even' ? 'biweekly-even' :
+                        'weekly';
+                } else {
+                    elements.scheduleFrequencySelect.value = 'weekly';
+                }
+            }
             elements.scheduleHourSelect.value = schedule.hour.toString();
             elements.scheduleMinuteSelect.value = schedule.minute.toString();
             syncTimeInputToDropdowns(); // Sync the time input with dropdown values
@@ -936,6 +962,16 @@ async function saveSchedule() {
     try {
         // If editing, include the existing schedule ID and preserve enabled state
         let scheduleData = { sourceName, dayOfWeek, hour, minute };
+
+        // Frequency (Option A single dropdown)
+        const val = elements.scheduleFrequencySelect?.value || 'weekly';
+        const frequency = val === 'weekly' ? 'weekly' : 'biweekly';
+        const weekPattern =
+            val === 'biweekly-odd' ? 'odd' :
+            val === 'biweekly-even' ? 'even' : null;
+
+        scheduleData.frequency = frequency;
+        scheduleData.weekPattern = weekPattern;
 
         // Optional test mode fields
         const testEnabled = elements.scheduleTestEnabled.checked === true;

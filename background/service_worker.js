@@ -19,12 +19,16 @@ import {
     markScheduleRun, addExecutionRecord, updateExecutionRecord,
     getExecutionHistory, getScheduleForSource, calculateNextRun,
     generateSheetUrlWithGid, addPendingSchedule, removePendingSchedule,
-    getPendingSchedules
+    getPendingSchedules,
+    validateSchedule
 } from './scheduler.js';
 import {
     setWebhookUrl, getWebhookUrl, testWebhook,
     notifyScheduleStarted, notifyScheduleCompleted, notifyScheduleFailed, notifyError,
-    notifyScrapeFailed
+    notifyScrapeFailed,
+    notifyLinkedInSignedOut,
+    notifyLinkedInCheckpoint,
+    notifyGoogleAuthExpired
 } from './notifications.js';
 import { CONFIG, ALARM_NAMES, MESSAGE_ACTIONS, STORAGE_KEYS, LOG_PREFIXES } from '../utils/constants.js';
 
@@ -74,6 +78,65 @@ function abortScrapeWait(tabId, reason = 'aborted') {
         // ignore
     }
     scrapeWaiters.delete(tabId);
+}
+
+// ============================================================
+// AUTH CHECK UTILITIES
+// ============================================================
+
+async function checkLinkedInAuthBeforeScrape(tabId, sourceName) {
+    try {
+        const authStatus = await chrome.tabs.sendMessage(tabId, {
+            action: MESSAGE_ACTIONS.CHECK_LINKEDIN_AUTH
+        });
+
+        if (authStatus?.status === 'signed_out') {
+            await notifyLinkedInSignedOut(`${authStatus.message || 'Signed out'} (${authStatus.url || 'unknown url'})`, sourceName).catch(() => {});
+            return { ok: false, status: 'signed_out', message: authStatus.message || 'LinkedIn signed out' };
+        }
+
+        if (authStatus?.status === 'checkpoint') {
+            await notifyLinkedInCheckpoint(`${authStatus.message || 'Checkpoint'} (${authStatus.url || 'unknown url'})`, sourceName).catch(() => {});
+            return { ok: false, status: 'checkpoint', message: authStatus.message || 'LinkedIn checkpoint detected' };
+        }
+
+        return { ok: true, status: authStatus?.status || 'ok', message: authStatus?.message || 'Authenticated' };
+    } catch (error) {
+        // Content script might not be injected yet, or tab navigated mid-flight.
+        // Fallback to URL-based detection.
+        try {
+            const tab = await chrome.tabs.get(tabId);
+            const url = tab?.url || '';
+
+            if (url.includes('/login') || url.includes('/uas/login') || url.includes('/authwall') || url.includes('linkedin.com/m/login')) {
+                await notifyLinkedInSignedOut(`Redirected to login/authwall (${url})`, sourceName).catch(() => {});
+                return { ok: false, status: 'signed_out', message: `Redirected to login/authwall (${url})` };
+            }
+
+            if (url.includes('/checkpoint/') || url.includes('/challenge/') || url.includes('/security/') || url.includes('/uas/consumer-email-challenge')) {
+                await notifyLinkedInCheckpoint(`Checkpoint/challenge URL detected (${url})`, sourceName).catch(() => {});
+                return { ok: false, status: 'checkpoint', message: `Checkpoint/challenge URL detected (${url})` };
+            }
+        } catch (e) {
+            // ignore
+        }
+
+        // If we can't determine, proceed (do not hard-fail due to messaging flake)
+        console.warn(`${LOG} Auth check inconclusive (proceeding):`, error?.message || error);
+        return { ok: true, status: 'unknown', message: 'Auth check inconclusive' };
+    }
+}
+
+async function performStartupAuthChecks() {
+    try {
+        // Non-interactive on startup to avoid popping auth UI unexpectedly.
+        await getAuthToken(false);
+    } catch (e) {
+        await notifyGoogleAuthExpired(
+            `Startup Google auth check failed (non-interactive): ${e?.message || String(e)}`,
+            null
+        ).catch(() => {});
+    }
 }
 
 // ============================================================
@@ -610,6 +673,12 @@ async function processAutoRunQueue() {
             
             // Wait for page load
             await new Promise(resolve => setTimeout(resolve, 6000));
+
+            // Auth gate (LinkedIn signed out / checkpoint)
+            const authCheck = await checkLinkedInAuthBeforeScrape(tab.id, source);
+            if (!authCheck.ok) {
+                throw new Error(`LinkedIn auth failure (${authCheck.status}): ${authCheck.message}`);
+            }
             
             // Send scraping command
             try {
@@ -752,6 +821,31 @@ async function processManualScrape() {
         
         // Wait for page load and content script injection
         await new Promise(resolve => setTimeout(resolve, 5000));
+
+        // Auth gate (LinkedIn signed out / checkpoint)
+        const authCheck = await checkLinkedInAuthBeforeScrape(tab.id, sourceName);
+        if (!authCheck.ok) {
+            console.error(`${LOG} Auth check failed, stopping manual scrape: ${authCheck.status} - ${authCheck.message}`);
+
+            // Update execution record if exists
+            if (state.executionId) {
+                await updateExecutionRecord(state.executionId, {
+                    status: 'failed',
+                    error: `Auth failure (${authCheck.status}): ${authCheck.message}`,
+                    completedAt: new Date().toISOString()
+                }).catch(() => {});
+            }
+
+            // Stop manual scrape cleanly
+            state.isRunning = false;
+            state.isAborted = false;
+            await saveToStorage({ manualScrapeState: state });
+            stopKeepAlive();
+
+            // Run any pending schedules now that manual mode is stopped
+            await processPendingSchedules();
+            return;
+        }
         
         // Send scraping command
         try {
@@ -1366,6 +1460,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 
                 case MESSAGE_ACTIONS.SET_SCHEDULE: {
                     const { schedule } = message;
+
+                    const validation = validateSchedule(schedule);
+                    if (!validation.valid) {
+                        response = { success: false, error: validation.error || 'Invalid schedule' };
+                        break;
+                    }
+
                     const result = await setSchedule(schedule);
                     response = { success: true, schedule: result };
                     break;
@@ -1489,6 +1590,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // Start background processors
         startQueueProcessor();
         startScheduleChecker();
+
+        // Startup auth checks (non-interactive)
+        performStartupAuthChecks().catch(() => {});
         
         // Clean up stuck states (isRunning but actually not running)
         const storedStates = await getFromStorage(['autoRunState', 'manualScrapeState']);

@@ -1,6 +1,7 @@
 // background/sheets_api.js - Google Sheets API Wrapper with Retry Logic
 
-import { getAuthToken } from './auth.js';
+import { getAuthToken, removeCachedToken } from './auth.js';
+import { notifyGoogleAuthExpired } from './notifications.js';
 import { SHEETS_API_BASE, HEADERS_ROW, LOG_PREFIXES } from '../utils/constants.js';
 
 const LOG = LOG_PREFIXES.SHEETS;
@@ -18,13 +19,20 @@ async function fetchWithRetry(url, options, retryCount = 0) {
         
         if (response.status === 401 && retryCount < 1) {
             console.log(`${LOG} 401 detected, refreshing token...`);
-            
+
             const oldToken = options.headers.Authorization.split(' ')[1];
-            await new Promise(resolve => 
-                chrome.identity.removeCachedAuthToken({ token: oldToken }, resolve)
-            );
+            await removeCachedToken(oldToken).catch(() => {});
             
-            const newToken = await getAuthToken(false);
+            let newToken;
+            try {
+                newToken = await getAuthToken(false);
+            } catch (e) {
+                await notifyGoogleAuthExpired(
+                    `Token refresh failed after 401 (non-interactive): ${e?.message || String(e)}`,
+                    null
+                ).catch(() => {});
+                throw e;
+            }
             options.headers.Authorization = `Bearer ${newToken}`;
             
             return fetchWithRetry(url, options, retryCount + 1);
@@ -41,7 +49,16 @@ async function fetchWithRetry(url, options, retryCount = 0) {
  * Make authenticated API call
  */
 async function apiCall(endpoint, options = {}) {
-    const token = await getAuthToken(true);
+    let token;
+    try {
+        token = await getAuthToken(true);
+    } catch (e) {
+        await notifyGoogleAuthExpired(
+            `getAuthToken failed (interactive may be required): ${e?.message || String(e)}`,
+            null
+        ).catch(() => {});
+        throw e;
+    }
     const url = endpoint.startsWith('http') ? endpoint : `${SHEETS_API_BASE}${endpoint}`;
     
     const fetchOptions = {
@@ -56,6 +73,21 @@ async function apiCall(endpoint, options = {}) {
     console.log(`${LOG} ${options.method || 'GET'} ${url.substring(0, 80)}...`);
     
     const response = await fetchWithRetry(url, fetchOptions);
+
+    // If we are still getting 401 here, it means refresh retry didn't fix it.
+    if (response.status === 401) {
+        let body = '';
+        try {
+            body = await response.text();
+        } catch (e) {
+            // ignore
+        }
+        await notifyGoogleAuthExpired(
+            `Sheets API 401 after refresh retry. Endpoint: ${endpoint}. Body: ${String(body).substring(0, 200)}`,
+            null
+        ).catch(() => {});
+        throw new Error('Google OAuth requires re-authentication (401 after refresh retry)');
+    }
     
     if (!response.ok) {
         const errorText = await response.text();

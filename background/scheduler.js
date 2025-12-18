@@ -49,24 +49,52 @@ function getEasternTime() {
     return new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
 }
 
+// ============================================================
+// BIWEEKLY (ODD/EVEN WEEK-OF-MONTH) HELPERS
+// ============================================================
+
 /**
- * Calculate next run time for a schedule
- * @param {Object} schedule - Schedule object
- * @returns {string} ISO string of next run time
+ * Week-of-month bucket by day-of-month ranges:
+ *  - Week 1: 1-7
+ *  - Week 2: 8-14
+ *  - Week 3: 15-21
+ *  - Week 4: 22-28
+ *  - Week 5: 29-31
+ * @param {Date} date
+ * @returns {number} 1-5
  */
-export function calculateNextRun(schedule) {
-    const now = getEasternTime();
+function getWeekOfMonthByDayBucket(date) {
+    const day = date.getDate(); // 1..31
+    return Math.floor((day - 1) / 7) + 1; // 1..5
+}
+
+/**
+ * Odd/even week pattern for the schedule system.
+ * Week 5 is treated as "odd" by design.
+ * @param {Date} date
+ * @returns {'odd'|'even'}
+ */
+function getOddEvenWeekPattern(date) {
+    const week = getWeekOfMonthByDayBucket(date);
+    return (week % 2 === 1) ? 'odd' : 'even';
+}
+
+function normalizeFrequency(raw) {
+    return raw === 'biweekly' ? 'biweekly' : 'weekly';
+}
+
+function calculateNextRunWeekly(schedule, now) {
     const currentDay = now.getDay();
     const currentHour = now.getHours();
     const currentMinute = now.getMinutes();
-    
+
     let daysUntilRun = schedule.dayOfWeek - currentDay;
-    
+
     // If same day, check if time has passed
     if (daysUntilRun === 0) {
         const scheduledMinutes = schedule.hour * 60 + schedule.minute;
         const currentMinutes = currentHour * 60 + currentMinute;
-        
+
         if (currentMinutes >= scheduledMinutes) {
             // Time passed today, schedule for next week
             daysUntilRun = 7;
@@ -75,12 +103,63 @@ export function calculateNextRun(schedule) {
         // Day already passed this week
         daysUntilRun += 7;
     }
-    
+
     const nextRun = new Date(now);
     nextRun.setDate(nextRun.getDate() + daysUntilRun);
     nextRun.setHours(schedule.hour, schedule.minute, 0, 0);
-    
+
     return nextRun.toISOString();
+}
+
+function calculateNextRunBiweekly(schedule, now) {
+    const pattern = schedule.weekPattern;
+    if (pattern !== 'odd' && pattern !== 'even') {
+        // Never return null; fall back to weekly so UI still works.
+        console.warn(`${LOG} Invalid biweekly weekPattern for ${schedule.sourceName || 'unknown'}; falling back to weekly`);
+        return calculateNextRunWeekly(schedule, now);
+    }
+
+    // Start candidate at today at scheduled time
+    const candidate = new Date(now);
+    candidate.setHours(schedule.hour, schedule.minute, 0, 0);
+
+    // If today's scheduled time has passed, start from tomorrow
+    if (candidate <= now) {
+        candidate.setDate(candidate.getDate() + 1);
+        candidate.setHours(schedule.hour, schedule.minute, 0, 0);
+    }
+
+    // Search forward up to 62 days to safely cross month boundaries
+    for (let i = 0; i < 62; i++) {
+        if (candidate.getDay() === schedule.dayOfWeek) {
+            const candidatePattern = getOddEvenWeekPattern(candidate);
+            if (candidatePattern === pattern) {
+                return candidate.toISOString();
+            }
+        }
+        candidate.setDate(candidate.getDate() + 1);
+        candidate.setHours(schedule.hour, schedule.minute, 0, 0);
+    }
+
+    // Fallback
+    console.warn(`${LOG} Failed to find next biweekly run for ${schedule.sourceName || 'unknown'} within 62 days; falling back to weekly`);
+    return calculateNextRunWeekly(schedule, now);
+}
+
+/**
+ * Calculate next run time for a schedule
+ * @param {Object} schedule - Schedule object
+ * @returns {string} ISO string of next run time
+ */
+export function calculateNextRun(schedule) {
+    const now = getEasternTime();
+    const frequency = normalizeFrequency(schedule?.frequency);
+
+    if (frequency === 'biweekly') {
+        return calculateNextRunBiweekly(schedule, now);
+    }
+
+    return calculateNextRunWeekly(schedule, now);
 }
 
 /**
@@ -131,12 +210,19 @@ export async function setSchedule(scheduleData) {
         console.log(`${LOG} Updated schedule for ${schedule.sourceName}`);
     } else {
         // Create new
+        const frequency = normalizeFrequency(scheduleData.frequency);
+        const weekPattern = frequency === 'biweekly'
+            ? (scheduleData.weekPattern === 'odd' || scheduleData.weekPattern === 'even' ? scheduleData.weekPattern : null)
+            : null;
+
         schedule = {
             id: generateId(),
             sourceName: scheduleData.sourceName,
             dayOfWeek: scheduleData.dayOfWeek,
             hour: scheduleData.hour,
             minute: scheduleData.minute || 0,
+            frequency,
+            weekPattern,
             enabled: scheduleData.enabled !== false,
             // Optional test-mode fields (for fast overlap testing)
             testEnabled: scheduleData.testEnabled === true,
@@ -272,6 +358,21 @@ export async function checkSchedules(includePending = true, runningSourceName = 
         
         // Check if day matches
         if (schedule.dayOfWeek !== currentDay) continue;
+
+        // Frequency gating (weekly vs biweekly odd/even week-of-month)
+        const frequency = normalizeFrequency(schedule.frequency);
+        if (frequency === 'biweekly') {
+            const pattern = schedule.weekPattern;
+            if (pattern !== 'odd' && pattern !== 'even') {
+                console.warn(`${LOG} Skipping ${schedule.sourceName} - invalid biweekly weekPattern`);
+                continue;
+            }
+
+            const currentPattern = getOddEvenWeekPattern(now);
+            if (pattern !== currentPattern) {
+                continue;
+            }
+        }
         
         // Check if within 10-minute window of scheduled time (5 min before to 5 min after)
         const scheduledMinutes = schedule.hour * 60 + schedule.minute;
@@ -473,6 +574,18 @@ export function validateSchedule(schedule) {
         return { valid: false, error: 'Minute must be 0-59' };
     }
 
+    // Frequency fields (optional; defaults to weekly)
+    if (schedule.frequency != null) {
+        if (schedule.frequency !== 'weekly' && schedule.frequency !== 'biweekly') {
+            return { valid: false, error: "Frequency must be 'weekly' or 'biweekly'" };
+        }
+    }
+    if ((schedule.frequency || 'weekly') === 'biweekly') {
+        if (schedule.weekPattern !== 'odd' && schedule.weekPattern !== 'even') {
+            return { valid: false, error: "Week pattern must be 'odd' or 'even' for biweekly schedules" };
+        }
+    }
+
     if (schedule.testEnabled === true) {
         if (schedule.testSearchUrl && typeof schedule.testSearchUrl !== 'string') {
             return { valid: false, error: 'Test search URL must be a string' };
@@ -500,7 +613,17 @@ export function getScheduleDescription(schedule) {
     const hour = schedule.hour % 12 || 12;
     const ampm = schedule.hour < 12 ? 'AM' : 'PM';
     const minute = String(schedule.minute).padStart(2, '0');
-    return `${day} at ${hour}:${minute} ${ampm}`;
+
+    const frequency = normalizeFrequency(schedule.frequency);
+    if (frequency === 'biweekly') {
+        const suffix =
+            schedule.weekPattern === 'odd' ? '(1st & 3rd)' :
+            schedule.weekPattern === 'even' ? '(2nd & 4th)' :
+            '(Biweekly)';
+        return `${day} at ${hour}:${minute} ${ampm} ${suffix}`;
+    }
+
+    return `${day} at ${hour}:${minute} ${ampm} (Weekly)`;
 }
 
 /**

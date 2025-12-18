@@ -60,10 +60,64 @@ function generateMessage(type, data) {
         'scrape_failed': `❌ Scrape failed for "${data.personName}" in search "${data.searchName}": ${data.failureType || 'Unknown'} - ${data.error || 'Unknown error'}`,
         'new_connections': `🆕 Found ${data.newConnections || 0} new connections for ${data.sourceName}`,
         'error': `🚨 ERROR: ${data.error || 'Unknown error'}`,
-        'test': '🧪 Test notification from Savvy Pirate - webhook is working!'
+        'test': '🧪 Test notification from Savvy Pirate - webhook is working!',
+
+        // Auth monitoring
+        'auth_linkedin_signout': `🔐 LINKEDIN SIGNED OUT - Manual login required. ${data.details || ''}`.trim(),
+        'auth_linkedin_checkpoint': `⚠️ LINKEDIN SECURITY CHALLENGE - Manual intervention required. ${data.details || ''}`.trim(),
+        'auth_google_expired': `🔑 GOOGLE AUTH REQUIRED - Re-authentication required. ${data.details || ''}`.trim()
     };
     
     return messages[type] || `Notification: ${type}`;
+}
+
+// ============================================================
+// AUTH NOTIFICATION RATE LIMITING (PERSISTED)
+// ============================================================
+
+const AUTH_NOTIFICATION_TYPES = new Set([
+    'auth_linkedin_signout',
+    'auth_linkedin_checkpoint',
+    'auth_google_expired'
+]);
+
+const AUTH_NOTIFICATION_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes
+
+async function getAuthLastSentMap() {
+    const stored = await getFromStorage([STORAGE_KEYS.NOTIFICATION_SETTINGS]);
+    const settings = stored[STORAGE_KEYS.NOTIFICATION_SETTINGS] || {};
+    return settings.authLastSent || {};
+}
+
+async function setAuthLastSent(type, isoTimestamp) {
+    const stored = await getFromStorage([STORAGE_KEYS.NOTIFICATION_SETTINGS]);
+    const settings = stored[STORAGE_KEYS.NOTIFICATION_SETTINGS] || {};
+    const authLastSent = settings.authLastSent || {};
+    authLastSent[type] = isoTimestamp;
+    await saveToStorage({
+        [STORAGE_KEYS.NOTIFICATION_SETTINGS]: {
+            ...settings,
+            authLastSent
+        }
+    });
+}
+
+async function shouldSendAuthNotification(type) {
+    if (!AUTH_NOTIFICATION_TYPES.has(type)) return true;
+
+    const lastMap = await getAuthLastSentMap();
+    const lastIso = lastMap[type];
+    if (!lastIso) return true;
+
+    const lastMs = Date.parse(lastIso);
+    if (!Number.isFinite(lastMs)) return true;
+
+    const now = Date.now();
+    if (now - lastMs < AUTH_NOTIFICATION_COOLDOWN_MS) {
+        console.log(`${LOG} Skipping ${type} notification (cooldown active)`);
+        return false;
+    }
+    return true;
 }
 
 // ============================================================
@@ -172,7 +226,15 @@ export async function sendNotification(type, data = {}) {
         }
         
         // Determine category for easier Zapier filtering
-        const errorTypes = ['schedule_failed', 'scrape_failed', 'error'];
+        const errorTypes = [
+            'schedule_failed',
+            'scrape_failed',
+            'error',
+            // Auth monitoring
+            'auth_linkedin_signout',
+            'auth_linkedin_checkpoint',
+            'auth_google_expired'
+        ];
         const statusTypes = ['schedule_started', 'schedule_completed', 'new_connections', 'scrape_complete'];
         const category = errorTypes.includes(type) ? 'error' : statusTypes.includes(type) ? 'status' : 'other';
         
@@ -344,5 +406,60 @@ export async function notifyScrapeFailed(personName, searchName, failureType, er
         sourceName: additionalContext.sourceName || 'Unknown Source', // Connection Source from Input Sheet
         ...additionalContext
     });
+}
+
+// ============================================================
+// AUTH ALERT CONVENIENCE METHODS
+// ============================================================
+
+export async function notifyLinkedInSignedOut(details, sourceName = null) {
+    const type = 'auth_linkedin_signout';
+    if (!(await shouldSendAuthNotification(type))) return false;
+
+    const success = await sendNotification(type, {
+        sourceName: sourceName || 'N/A',
+        details: details || 'LinkedIn appears to be signed out',
+        requiresAction: 'Log into LinkedIn in the Pi browser',
+        detectedAt: new Date().toISOString()
+    });
+
+    if (success) {
+        await setAuthLastSent(type, new Date().toISOString());
+    }
+    return success;
+}
+
+export async function notifyLinkedInCheckpoint(details, sourceName = null) {
+    const type = 'auth_linkedin_checkpoint';
+    if (!(await shouldSendAuthNotification(type))) return false;
+
+    const success = await sendNotification(type, {
+        sourceName: sourceName || 'N/A',
+        details: details || 'LinkedIn security checkpoint/CAPTCHA detected',
+        requiresAction: 'Complete the LinkedIn security challenge in the Pi browser',
+        detectedAt: new Date().toISOString()
+    });
+
+    if (success) {
+        await setAuthLastSent(type, new Date().toISOString());
+    }
+    return success;
+}
+
+export async function notifyGoogleAuthExpired(details, sourceName = null) {
+    const type = 'auth_google_expired';
+    if (!(await shouldSendAuthNotification(type))) return false;
+
+    const success = await sendNotification(type, {
+        sourceName: sourceName || 'N/A',
+        details: details || 'Google OAuth token expired or requires re-auth',
+        requiresAction: 'Re-authenticate Google in the Pi browser (Chrome identity)',
+        detectedAt: new Date().toISOString()
+    });
+
+    if (success) {
+        await setAuthLastSent(type, new Date().toISOString());
+    }
+    return success;
 }
 

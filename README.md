@@ -121,8 +121,9 @@ Before using this extension, you need:
 1. **Google Cloud Project** with:
    - Google Sheets API enabled
    - Google Drive API enabled
-   - OAuth 2.0 Client ID (Chrome Extension type)
-   - Extension ID added to authorized redirect URIs
+   - OAuth 2.0 Client ID (**Web application** type) ✅ Recommended (works on Raspberry Pi Chromium)
+   - Authorized redirect URIs include: `https://<EXTENSION_ID>.chromiumapp.org/`
+     - You get `<EXTENSION_ID>` from `chrome://extensions` after loading the unpacked extension
 
 2. **Chrome Browser** (Manifest V3 compatible)
 
@@ -206,124 +207,37 @@ The extension works differently on **Chrome (Windows/Mac)** vs **Chromium (Linux
 
 ### Chrome (Windows/Mac) - Standard Installation
 
-- Uses `chrome.identity.getAuthToken()` which requires browser sign-in
-- Works out of the box with a **Chrome Extension** OAuth client ID
+- Uses OAuth via `chrome.identity.launchWebAuthFlow()` and caches tokens in extension storage
+- Works well with a **Web application** OAuth client ID + `chromiumapp.org` redirect URIs
 
 ### Chromium (Linux/Raspberry Pi) - Requires OAuth Modification
 
-Chromium has broken `chrome.identity.getAuthToken()` support on some Linux builds (including common Raspberry Pi setups). To authenticate reliably, you must use `chrome.identity.launchWebAuthFlow()` with a **Web application** OAuth client instead.
+Chromium on Raspberry Pi frequently fails with `chrome.identity.getAuthToken()` (“The user is not signed in.”), even after logging in. This project uses a **Chromium-safe** OAuth flow via `chrome.identity.launchWebAuthFlow()` and cached tokens.
 
 **Steps:**
 
 1. In Google Cloud Console → **APIs & Services** → **Credentials**, create a **NEW OAuth 2.0 Client ID**:
    - Application type: **Web application** (not Chrome extension)
    - Name: "Savvy Pirate Web"
-   - Authorized redirect URIs: `https://<EXTENSION_ID>.chromiumapp.org/`
+   - Authorized redirect URIs:
+     - `https://<EXTENSION_ID>.chromiumapp.org/`
+     - If you ever get a *new* extension ID, add another redirect URI (you can have multiple)
    - Get the extension ID from `chrome://extensions` after loading the extension
 
 2. Update `manifest.json` with the new **Web application** client ID
 
-3. Replace `background/auth.js` with the Chromium-compatible version that uses `launchWebAuthFlow`:
+3. Reload the extension and authenticate via the OAuth popup that appears
 
-```javascript
-// background/auth.js - OAuth Token Management (Chromium-compatible)
+#### IMPORTANT: Extension ID stability (avoid changing OAuth redirect URIs)
 
-const LOG = '[AUTH]';
-const TOKEN_STORAGE_KEY = 'oauth_access_token';
-const TOKEN_EXPIRY_KEY = 'oauth_token_expiry';
+Your OAuth redirect URI uses the extension ID:
 
-export async function getAuthToken(interactive = false) {
-    const cached = await getCachedToken();
-    if (cached) {
-        console.log(`${LOG} Using cached token`);
-        return cached;
-    }
-    
-    if (!interactive) {
-        throw new Error('No cached token and interactive=false');
-    }
-    
-    return await launchWebAuthFlowAuth();
-}
+- `https://<EXTENSION_ID>.chromiumapp.org/`
 
-async function launchWebAuthFlowAuth() {
-    console.log(`${LOG} Starting launchWebAuthFlow...`);
-    
-    const manifest = chrome.runtime.getManifest();
-    const clientId = manifest.oauth2?.client_id;
-    
-    if (!clientId) {
-        throw new Error('No OAuth client_id in manifest');
-    }
-    
-    const redirectUri = chrome.identity.getRedirectURL();
-    console.log(`${LOG} Redirect URI: ${redirectUri}`);
-    
-    const scopes = manifest.oauth2?.scopes?.join(' ') || 
-        'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file';
-    
-    const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
-    authUrl.searchParams.set('client_id', clientId);
-    authUrl.searchParams.set('redirect_uri', redirectUri);
-    authUrl.searchParams.set('response_type', 'token');
-    authUrl.searchParams.set('scope', scopes);
-    
-    return new Promise((resolve, reject) => {
-        chrome.identity.launchWebAuthFlow(
-            { url: authUrl.toString(), interactive: true },
-            async (responseUrl) => {
-                if (chrome.runtime.lastError) {
-                    console.error(`${LOG} Auth error:`, chrome.runtime.lastError.message);
-                    reject(new Error(chrome.runtime.lastError.message));
-                    return;
-                }
-                
-                if (!responseUrl) {
-                    reject(new Error('No response URL'));
-                    return;
-                }
-                
-                const url = new URL(responseUrl);
-                const params = new URLSearchParams(url.hash.substring(1));
-                const accessToken = params.get('access_token');
-                const expiresIn = params.get('expires_in');
-                
-                if (!accessToken) {
-                    reject(new Error('No access token in response'));
-                    return;
-                }
-                
-                const expiry = Date.now() + (parseInt(expiresIn || '3600') * 1000) - 60000;
-                await chrome.storage.local.set({
-                    [TOKEN_STORAGE_KEY]: accessToken,
-                    [TOKEN_EXPIRY_KEY]: expiry
-                });
-                
-                console.log(`${LOG} Token obtained, expires in ${expiresIn}s`);
-                resolve(accessToken);
-            }
-        );
-    });
-}
+To keep the **same extension ID** on the Pi:
 
-async function getCachedToken() {
-    const result = await chrome.storage.local.get([TOKEN_STORAGE_KEY, TOKEN_EXPIRY_KEY]);
-    const token = result[TOKEN_STORAGE_KEY];
-    const expiry = result[TOKEN_EXPIRY_KEY];
-    
-    if (token && expiry && Date.now() < expiry) {
-        return token;
-    }
-    return null;
-}
-
-export async function removeCachedToken(token) {
-    await chrome.storage.local.remove([TOKEN_STORAGE_KEY, TOKEN_EXPIRY_KEY]);
-    console.log(`${LOG} Token cache cleared`);
-}
-```
-
-4. Reload the extension and authenticate via the popup that appears
+- Always load the extension from the **same folder path** (shown in `chrome://extensions` → Details → “Loaded from”)
+- When updating code, **copy files into that same folder** and click **Reload** (do not “Load unpacked” again)
 
 ## Raspberry Pi VNC Setup for Headless Operation
 
@@ -374,6 +288,50 @@ hostname -I
 ## Deploying Code Updates to Raspberry Pi
 
 When you make changes on your development machine, you can push updated extension code to the Pi and reload the extension in Chromium.
+
+### Recommended: use the included deploy scripts (keeps the same extension ID)
+
+This repo includes:
+
+- `deploy-to-pi.sh` (bash; runs scp/ssh)
+- `Deploy-to-Pi.bat` (one-click Windows wrapper; runs `deploy-to-pi.sh --files-only`)
+
+#### Key rule (to avoid a new extension ID)
+
+Deploy updates into the **same folder** Chromium is already using on the Pi:
+
+- On the Pi, open `chrome://extensions` → Savvy Pirate → Details
+- Confirm: **Loaded from: `~/extensions`**
+- Ensure `PI_EXTENSION_PATH="/home/savvy-pirate/extensions"` in `deploy-to-pi.sh`
+
+#### Typical workflow
+
+1. On Windows, run `Deploy-to-Pi.bat` (copies files only)
+2. On the Pi, open `chrome://extensions`
+3. Click **Reload** on the existing Savvy Pirate extension
+
+### deploy-to-pi.sh options
+
+From Git Bash on Windows:
+
+```bash
+./deploy-to-pi.sh --files-only   # copy files only (recommended default)
+./deploy-to-pi.sh --quick        # copy frequently edited files + restart chromium
+./deploy-to-pi.sh --restart      # restart chromium only
+./deploy-to-pi.sh --status       # show chromium status + extension folder listing
+```
+
+### Branch workflow (deploy from the branch you’re working on)
+
+If you’re developing on a feature branch:
+
+```bash
+git checkout <your-branch>
+git pull
+./deploy-to-pi.sh --files-only
+```
+
+Then reload the extension on the Pi in `chrome://extensions`.
 
 ### Using SCP (Secure Copy)
 
@@ -590,6 +548,17 @@ Each workbook automatically creates weekly tabs named `MM_DD_YY` (Eastern Time):
 - Re-authenticate by clicking extension icon
 - Ensure OAuth Client ID in `manifest.json` matches Google Cloud Console
 - Verify OAuth consent screen is configured correctly
+
+#### OAuth keeps prompting / “The user is not signed in” (Raspberry Pi Chromium)
+
+If you keep getting re-prompted to log in (or you see an auth error like **“The user is not signed in.”**) on the Pi:
+
+1. On the Pi, open `chrome://extensions` → Savvy Pirate → copy the **ID**
+2. In Google Cloud Console → **APIs & Services → Credentials**, confirm you are using a **Web application** OAuth client
+3. In that same OAuth client, confirm **Authorized redirect URIs** includes:
+   - `https://<EXTENSION_ID>.chromiumapp.org/` (replace with the ID from step 1)
+4. Confirm the Pi’s deployed `manifest.json` uses that **Web application client ID** (not a Chrome extension client)
+5. Reload the extension (`chrome://extensions` → Reload) and try again
 
 ### Service Worker Inactive
 

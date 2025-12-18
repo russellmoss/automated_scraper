@@ -152,6 +152,102 @@
     }
 
     // ============================================================
+    // LINKEDIN AUTH STATUS CHECK
+    // ============================================================
+
+    /**
+     * Check if a DOM element is actually visible (ignore hidden/inert elements).
+     * @param {Element|null} el
+     * @returns {boolean}
+     */
+    function isElementVisible(el) {
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+        const rect = el.getBoundingClientRect();
+        if (!rect || rect.width === 0 || rect.height === 0) return false;
+        return true;
+    }
+
+    /**
+     * Determine LinkedIn auth status on the current tab.
+     * @returns {{status: 'ok'|'signed_out'|'checkpoint', message: string, url: string}}
+     */
+    function checkLinkedInAuthStatus() {
+        const url = window.location.href || '';
+
+        // URL-based detection (fast + reliable)
+        if (
+            url.includes('/login') ||
+            url.includes('/uas/login') ||
+            url.includes('/authwall') ||
+            url.includes('linkedin.com/m/login')
+        ) {
+            return { status: 'signed_out', message: 'Redirected to LinkedIn login/authwall', url };
+        }
+
+        if (
+            url.includes('/checkpoint/') ||
+            url.includes('/challenge/') ||
+            url.includes('/security/') ||
+            url.includes('/uas/consumer-email-challenge')
+        ) {
+            return { status: 'checkpoint', message: 'LinkedIn security checkpoint/challenge URL detected', url };
+        }
+
+        // DOM-based detection (guarded by visibility checks)
+        const loginSelectors = [
+            'form[action*="login"]',
+            'form[action*="uas/login"]',
+            'input#username',
+            'input#password',
+            'input[name="session_key"]',
+            'input[name="session_password"]'
+        ];
+
+        for (const selector of loginSelectors) {
+            const el = document.querySelector(selector);
+            if (el && isElementVisible(el)) {
+                return { status: 'signed_out', message: `Login UI detected (${selector})`, url };
+            }
+        }
+
+        // Checkpoint / CAPTCHA UI (only if visibly present)
+        const checkpointSelectors = [
+            '[class*="checkpoint"]',
+            '[class*="challenge"]',
+            '[data-test*="challenge"]',
+            '[data-test*="checkpoint"]',
+            'form[action*="checkpoint"]',
+            '#email-pin-challenge',
+            '.checkpoint-challenge',
+            '.challenge-dialog'
+        ];
+
+        for (const selector of checkpointSelectors) {
+            const el = document.querySelector(selector);
+            if (el && isElementVisible(el)) {
+                return { status: 'checkpoint', message: `Checkpoint/challenge UI detected (${selector})`, url };
+            }
+        }
+
+        const captchaSelectors = [
+            '.captcha',
+            '#captcha',
+            '[id*="captcha"]',
+            'iframe[src*="captcha"]'
+        ];
+        for (const selector of captchaSelectors) {
+            const el = document.querySelector(selector);
+            if (el && isElementVisible(el)) {
+                return { status: 'checkpoint', message: `Visible CAPTCHA detected (${selector})`, url };
+            }
+        }
+
+        return { status: 'ok', message: 'Authenticated', url };
+    }
+
+    // ============================================================
     // CARD FINDING
     // ============================================================
     function findProfileCards() {
@@ -770,6 +866,12 @@
             case 'PING':
                 sendResponse({ success: true, status: 'alive' });
                 return true;
+
+            case 'CHECK_LINKEDIN_AUTH': {
+                const authStatus = checkLinkedInAuthStatus();
+                sendResponse(authStatus);
+                return true;
+            }
                 
             default:
                 sendResponse({ success: false, error: 'Unknown action' });
