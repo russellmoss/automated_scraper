@@ -200,6 +200,233 @@ cd automated_scraper
 3. You should be prompted to authenticate with Google (first time only)
 4. After authentication, you can start configuring the extension
 
+## Platform-Specific Installation (Chrome vs Chromium/Raspberry Pi)
+
+The extension works differently on **Chrome (Windows/Mac)** vs **Chromium (Linux/Raspberry Pi)** due to differences in OAuth support.
+
+### Chrome (Windows/Mac) - Standard Installation
+
+- Uses `chrome.identity.getAuthToken()` which requires browser sign-in
+- Works out of the box with a **Chrome Extension** OAuth client ID
+
+### Chromium (Linux/Raspberry Pi) - Requires OAuth Modification
+
+Chromium has broken `chrome.identity.getAuthToken()` support on some Linux builds (including common Raspberry Pi setups). To authenticate reliably, you must use `chrome.identity.launchWebAuthFlow()` with a **Web application** OAuth client instead.
+
+**Steps:**
+
+1. In Google Cloud Console → **APIs & Services** → **Credentials**, create a **NEW OAuth 2.0 Client ID**:
+   - Application type: **Web application** (not Chrome extension)
+   - Name: "Savvy Pirate Web"
+   - Authorized redirect URIs: `https://<EXTENSION_ID>.chromiumapp.org/`
+   - Get the extension ID from `chrome://extensions` after loading the extension
+
+2. Update `manifest.json` with the new **Web application** client ID
+
+3. Replace `background/auth.js` with the Chromium-compatible version that uses `launchWebAuthFlow`:
+
+```javascript
+// background/auth.js - OAuth Token Management (Chromium-compatible)
+
+const LOG = '[AUTH]';
+const TOKEN_STORAGE_KEY = 'oauth_access_token';
+const TOKEN_EXPIRY_KEY = 'oauth_token_expiry';
+
+export async function getAuthToken(interactive = false) {
+    const cached = await getCachedToken();
+    if (cached) {
+        console.log(`${LOG} Using cached token`);
+        return cached;
+    }
+    
+    if (!interactive) {
+        throw new Error('No cached token and interactive=false');
+    }
+    
+    return await launchWebAuthFlowAuth();
+}
+
+async function launchWebAuthFlowAuth() {
+    console.log(`${LOG} Starting launchWebAuthFlow...`);
+    
+    const manifest = chrome.runtime.getManifest();
+    const clientId = manifest.oauth2?.client_id;
+    
+    if (!clientId) {
+        throw new Error('No OAuth client_id in manifest');
+    }
+    
+    const redirectUri = chrome.identity.getRedirectURL();
+    console.log(`${LOG} Redirect URI: ${redirectUri}`);
+    
+    const scopes = manifest.oauth2?.scopes?.join(' ') || 
+        'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file';
+    
+    const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+    authUrl.searchParams.set('client_id', clientId);
+    authUrl.searchParams.set('redirect_uri', redirectUri);
+    authUrl.searchParams.set('response_type', 'token');
+    authUrl.searchParams.set('scope', scopes);
+    
+    return new Promise((resolve, reject) => {
+        chrome.identity.launchWebAuthFlow(
+            { url: authUrl.toString(), interactive: true },
+            async (responseUrl) => {
+                if (chrome.runtime.lastError) {
+                    console.error(`${LOG} Auth error:`, chrome.runtime.lastError.message);
+                    reject(new Error(chrome.runtime.lastError.message));
+                    return;
+                }
+                
+                if (!responseUrl) {
+                    reject(new Error('No response URL'));
+                    return;
+                }
+                
+                const url = new URL(responseUrl);
+                const params = new URLSearchParams(url.hash.substring(1));
+                const accessToken = params.get('access_token');
+                const expiresIn = params.get('expires_in');
+                
+                if (!accessToken) {
+                    reject(new Error('No access token in response'));
+                    return;
+                }
+                
+                const expiry = Date.now() + (parseInt(expiresIn || '3600') * 1000) - 60000;
+                await chrome.storage.local.set({
+                    [TOKEN_STORAGE_KEY]: accessToken,
+                    [TOKEN_EXPIRY_KEY]: expiry
+                });
+                
+                console.log(`${LOG} Token obtained, expires in ${expiresIn}s`);
+                resolve(accessToken);
+            }
+        );
+    });
+}
+
+async function getCachedToken() {
+    const result = await chrome.storage.local.get([TOKEN_STORAGE_KEY, TOKEN_EXPIRY_KEY]);
+    const token = result[TOKEN_STORAGE_KEY];
+    const expiry = result[TOKEN_EXPIRY_KEY];
+    
+    if (token && expiry && Date.now() < expiry) {
+        return token;
+    }
+    return null;
+}
+
+export async function removeCachedToken(token) {
+    await chrome.storage.local.remove([TOKEN_STORAGE_KEY, TOKEN_EXPIRY_KEY]);
+    console.log(`${LOG} Token cache cleared`);
+}
+```
+
+4. Reload the extension and authenticate via the popup that appears
+
+## Raspberry Pi VNC Setup for Headless Operation
+
+If you’re running the extension on a Raspberry Pi 24/7, VNC lets you remotely manage Chromium + the extension from your development PC.
+
+### On the Raspberry Pi:
+
+1. **Enable VNC via raspi-config:**
+
+```bash
+sudo raspi-config
+# Navigate to: Interface Options → VNC → Enable
+```
+
+2. **Or install RealVNC Server manually:**
+
+```bash
+sudo apt update
+sudo apt install realvnc-vnc-server realvnc-vnc-viewer
+sudo systemctl enable vncserver-x11-serviced
+sudo systemctl start vncserver-x11-serviced
+```
+
+3. **Find Pi's IP address:**
+
+```bash
+hostname -I
+```
+
+4. **Set a static IP (recommended):**
+   - Edit `/etc/dhcpcd.conf` or configure via your router's DHCP reservation
+
+### On your PC (Windows/Mac):
+
+1. Download and install [RealVNC Viewer](https://www.realvnc.com/en/connect/download/viewer/)
+2. Connect using: `<PI_IP_ADDRESS>:5900` (e.g., `192.168.3.232:5900`)
+3. Login with your Pi username and password
+
+### First-Time Extension Setup via VNC:
+
+1. Open Chromium on the Pi
+2. Go to `chrome://extensions` → Enable Developer Mode → Load unpacked
+3. Complete Google OAuth sign-in (one-time)
+4. Login to LinkedIn (one-time)
+5. Configure schedules and sources
+6. Extension will run 24/7 even when VNC is disconnected
+
+## Deploying Code Updates to Raspberry Pi
+
+When you make changes on your development machine, you can push updated extension code to the Pi and reload the extension in Chromium.
+
+### Using SCP (Secure Copy)
+
+**From Windows (PowerShell or CMD):**
+
+```bash
+scp -r "C:\Users\<USERNAME>\path\to\automated_scraper" <PI_USER>@<PI_IP>:~/extensions/
+```
+
+**Example:**
+
+```bash
+scp -r "C:\Users\russe\automated_scraper" savvy-pirate@192.168.3.232:~/extensions/
+```
+
+**From Mac/Linux:**
+
+```bash
+scp -r ~/path/to/automated_scraper <PI_USER>@<PI_IP>:~/extensions/
+```
+
+### After Deploying:
+
+1. Connect via VNC
+2. Go to `chrome://extensions`
+3. Click the refresh icon on Savvy Pirate to reload the extension
+4. Verify in service worker console that the new version loaded
+
+### Optional: Create a Deploy Script
+
+**Windows (deploy.bat):**
+
+```batch
+@echo off
+scp -r "C:\Users\russe\automated_scraper" savvy-pirate@192.168.3.232:~/extensions/
+echo Deployed! Remember to reload the extension in Chromium.
+pause
+```
+
+**Mac/Linux (deploy.sh):**
+
+```bash
+#!/bin/bash
+scp -r ~/automated_scraper savvy-pirate@192.168.3.232:~/extensions/
+echo "Deployed! Remember to reload the extension in Chromium."
+```
+
+### SSH Access (for troubleshooting):
+
+```bash
+ssh savvy-pirate@192.168.3.232
+```
+
 ## Usage
 
 ### First-Time Setup
