@@ -2,9 +2,9 @@
 
 export const CONFIG = {
     // Scraping timing (anti-detection)
-    MIN_WAIT_SECONDS: 8,
-    MAX_WAIT_SECONDS: 25,
-    SCROLL_WAIT_MS: 2000,
+    MIN_WAIT_SECONDS: 15,
+    MAX_WAIT_SECONDS: 40,
+    SCROLL_WAIT_MS: 4000,
     MAX_PAGES: 1000,
     
     // Long pause configuration (simulates user distraction)
@@ -13,14 +13,14 @@ export const CONFIG = {
     LONG_PAUSE_MAX_SECONDS: 120,   // Maximum long pause duration (2 minutes)
     
     // Between-search delays (service worker)
-    BETWEEN_SEARCH_MIN_SECONDS: 45,
-    BETWEEN_SEARCH_MAX_SECONDS: 90,
+    BETWEEN_SEARCH_MIN_SECONDS: 60,
+    BETWEEN_SEARCH_MAX_SECONDS: 120,
     
     // Noise activity config
     NOISE_ACTIVITY_ENABLED: true,
     NOISE_CHANCE: 0.4,                // 40% chance of noise activity between searches
-    NOISE_MIN_DURATION_SECONDS: 15,
-    NOISE_MAX_DURATION_SECONDS: 45,
+    NOISE_MIN_DURATION_SECONDS: 25,
+    NOISE_MAX_DURATION_SECONDS: 75,
     NOISE_URLS: [
         'https://www.linkedin.com/feed/',
         'https://www.linkedin.com/mynetwork/',
@@ -29,16 +29,16 @@ export const CONFIG = {
     ],
     
     // Queue processing
-    QUEUE_PROCESS_INTERVAL_MINUTES: 0.5,  // 30 seconds
-    KEEPALIVE_INTERVAL_MINUTES: 0.4,      // 24 seconds
+    QUEUE_PROCESS_INTERVAL_MINUTES: 1.0,  // 60 seconds
+    KEEPALIVE_INTERVAL_MINUTES: 0.5,      // 30 seconds
     MAX_RETRIES: 5,
-    BASE_DELAY_MS: 2000,
+    BASE_DELAY_MS: 4000,
     
     // Schedule execution
     SCHEDULE_CHECK_INTERVAL_MINUTES: 1,    // Check every minute
     
     // Notifications
-    WEBHOOK_TIMEOUT_MS: 10000
+    WEBHOOK_TIMEOUT_MS: 25000
 };
 
 export const ALARM_NAMES = {

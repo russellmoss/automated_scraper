@@ -456,7 +456,7 @@ async function getOrCreateDedicatedScrapeTab() {
     await saveToStorage({ [STORAGE_KEYS.DEDICATED_SCRAPE_TAB_ID]: newTab.id });
     
     // Wait for tab to load
-    await new Promise(resolve => setTimeout(resolve, 3000));
+    await new Promise(resolve => setTimeout(resolve, 6000));
     
     return newTab;
 }
@@ -609,7 +609,7 @@ async function processAutoRunQueue() {
             await chrome.tabs.update(tab.id, { url: search.url });
             
             // Wait for page load
-            await new Promise(resolve => setTimeout(resolve, 3000));
+            await new Promise(resolve => setTimeout(resolve, 6000));
             
             // Send scraping command
             try {

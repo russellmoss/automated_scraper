@@ -12,9 +12,9 @@
     // ============================================================
     const CONFIG = {
         MAX_PAGES: 1000,
-        MIN_WAIT_SECONDS: 8,
-        MAX_WAIT_SECONDS: 25,
-        SCROLL_WAIT_MS: 2000,
+        MIN_WAIT_SECONDS: 15,
+        MAX_WAIT_SECONDS: 40,
+        SCROLL_WAIT_MS: 4000,
         LONG_PAUSE_CHANCE: 0.15,
         LONG_PAUSE_MIN_SECONDS: 45,
         LONG_PAUSE_MAX_SECONDS: 120
@@ -482,7 +482,7 @@
     // ============================================================
     // SCRAPING FUNCTIONS
     // ============================================================
-    async function waitForEntriesToLoad(expected, timeout = 10000) {
+    async function waitForEntriesToLoad(expected, timeout = 20000) {
         const startTime = Date.now();
         while (Date.now() - startTime < timeout) {
             if (stopRequested) return false;
@@ -646,7 +646,7 @@
         try {
             while (totalPages < maxPages && !stopRequested) {
                 // Wait for entries to load
-                await waitForEntriesToLoad(1, 10000);
+                await waitForEntriesToLoad(1, 20000);
                 
                 // Scrape current page
                 const rows = await scrapeCurrentPage(sourceName);
