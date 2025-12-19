@@ -26,10 +26,10 @@
     const SELECTORS = {
         NAME_LINK: 'a[data-view-name="search-result-lockup-title"]',
         // OLD selectors still work (acd09c55 for title, bb0216de for location)
-        TITLE_PRIMARY: 'div.acd09c55 > p',  // ✅ Working
+        TITLE_PRIMARY: 'div.acd09c55 > p',  // Working
         TITLE_FALLBACK_1: 'div[data-view-name="people-search-result"] div.d395caa1:not(.a7293f27) > p',
         TITLE_FALLBACK_2: 'div[data-view-name="people-search-result"] div.d395caa1:first-of-type > p',
-        LOCATION_PRIMARY: 'div.bb0216de > p',  // ✅ Working
+        LOCATION_PRIMARY: 'div.bb0216de > p',  // Working
         LOCATION_FALLBACK_1: 'div[data-view-name="people-search-result"] div.d395caa1.a7293f27 > p',
         LOCATION_FALLBACK_2: 'div[data-view-name="people-search-result"] div.d395caa1:nth-of-type(2) > p',
         NEXT_BUTTON: 'button[data-testid="pagination-controls-next-button-visible"]'
@@ -476,7 +476,7 @@
         
         // Validate that we have a valid name and URL
         if (!nameLink || !nameText || !nameText.trim()) {
-            console.warn('[CS] ⚠️ Skipping card: no valid name link or name text');
+            console.warn('[CS] WARNING: Skipping card: no valid name link or name text');
             return null;
         }
         
@@ -484,14 +484,14 @@
         
         // Validate clean name is not empty
         if (!cleanName || !cleanName.trim()) {
-            console.warn('[CS] ⚠️ Skipping card: name is empty after cleaning');
+            console.warn('[CS] WARNING: Skipping card: name is empty after cleaning');
             return null;
         }
         
         // Extract URL - must be a profile URL, not search results
         let url = nameLink.href?.split('?')[0] || '';
         if (!url || !url.includes('/in/')) {
-            console.warn('[CS] ⚠️ Skipping card: invalid profile URL', url);
+            console.warn('[CS] WARNING: Skipping card: invalid profile URL', url);
             return null;
         }
         
@@ -559,7 +559,7 @@
         }
         
         if (!title && !location) {
-            console.warn('[CS] ⚠️ Failed to extract title and location for:', cleanName);
+            console.warn('[CS] WARNING: Failed to extract title and location for:', cleanName);
         }
         
         const today = new Date().toISOString().split('T')[0];
@@ -615,7 +615,7 @@
                 // Check for duplicates by URL (column index 5)
                 const url = row[5];
                 if (url && seenUrls.has(url)) {
-                    console.warn('[CS] ⚠️ Skipping duplicate URL:', url);
+                    console.warn('[CS] WARNING: Skipping duplicate URL:', url);
                     continue;
                 }
                 
@@ -701,7 +701,7 @@
         
         stopButton = document.createElement('button');
         stopButton.id = 'savvy-pirate-stop-btn';
-        stopButton.innerHTML = '⏹ Stop Scraping';
+        stopButton.innerHTML = 'STOP Scraping';
         stopButton.style.cssText = `
             position: fixed;
             top: 20px;
@@ -767,15 +767,15 @@
                 const entriesLoaded = await waitForEntriesToLoad(1, 20000);
                 
                 if (!entriesLoaded) {
-                    console.warn('[CS] ⚠️ Timeout waiting for entries to load - checking if we're on last page');
+                    console.warn('[CS] WARNING: Timeout waiting for entries to load - checking if we\'re on last page');
                     // Check pagination state - if no next button, we're done
                     const pagination = detectPaginationState();
                     if (!pagination.hasNext) {
-                        console.log('[CS] ✅ No next button found after timeout - assuming last page');
+                        console.log('[CS] OK: No next button found after timeout - assuming last page');
                         break;
                     }
                     // If there's a next button but entries didn't load, continue anyway (might be slow loading)
-                    console.log('[CS] ⚠️ Entries didn't load but next button exists - continuing');
+                    console.log('[CS] WARNING: Entries didn\'t load but next button exists - continuing');
                 }
                 
                 // Scrape current page
@@ -792,19 +792,19 @@
                         pageNumber: totalPages
                     });
                     
-                    console.log(`[CS] ✅ Page ${totalPages}: Scraped ${rows.length} profiles (Total: ${totalProfiles})`);
+                    console.log(`[CS] OK: Page ${totalPages}: Scraped ${rows.length} profiles (Total: ${totalProfiles})`);
                 } else {
                     // If we scraped 0 profiles, check if we're on the last page
-                    console.warn('[CS] ⚠️ No profiles found on this page');
+                    console.warn('[CS] WARNING: No profiles found on this page');
                     const pagination = detectPaginationState();
                     if (!pagination.hasNext) {
-                        console.log('[CS] ✅ No profiles and no next button - assuming last page');
+                        console.log('[CS] OK: No profiles and no next button - assuming last page');
                         break;
                     }
                 }
                 
                 if (stopRequested) {
-                    console.log('[CS] ⏹ Stop requested by user');
+                    console.log('[CS] STOP: Stop requested by user');
                     break;
                 }
                 
@@ -812,24 +812,24 @@
                 const hasNext = await clickNextButton();
                 
                 if (!hasNext) {
-                    console.log('[CS] ✅ No more pages available');
+                    console.log('[CS] OK: No more pages available');
                     break;
                 }
                 
                 // Random delay between pages
                 const delay = randomDelay();
-                console.log(`[CS] ⏳ Waiting ${(delay/1000).toFixed(1)}s before next page...`);
+                console.log(`[CS] Waiting ${(delay/1000).toFixed(1)}s before next page...`);
                 await wait(delay);
                 
                 // Occasional long pause to simulate user distraction
                 if (shouldTakeLongPause()) {
                     const longDelay = longPauseDelay();
-                    console.log(`[CS] ☕ Taking a break... ${(longDelay/1000).toFixed(0)}s (simulating user distraction)`);
+                    console.log(`[CS] Taking a break... ${(longDelay/1000).toFixed(0)}s (simulating user distraction)`);
                     await wait(longDelay);
                 }
             }
             
-            console.log(`[CS] ✅ Scraping complete: ${totalProfiles} profiles from ${totalPages} pages`);
+            console.log(`[CS] OK: Scraping complete: ${totalProfiles} profiles from ${totalPages} pages`);
             
             // Send completion message
             sendMessageSafe({
@@ -924,7 +924,7 @@
     // ============================================================
     // INITIALIZATION
     // ============================================================
-    console.log(`[CS] ✅ Content script loaded (${SCRIPT_VERSION})`);
+    console.log(`[CS] OK: Content script loaded (${SCRIPT_VERSION})`);
     
     // Auto-validate selectors on search pages
     if (window.location.href.includes('linkedin.com/search/results/people')) {
@@ -932,7 +932,7 @@
         console.log(`[CS] Found ${nameLinks.length} profile links on page`);
         
         if (nameLinks.length === 0) {
-            console.warn('[CS] ⚠️ No profile links found - page may not be loaded yet');
+            console.warn('[CS] WARNING: No profile links found - page may not be loaded yet');
         }
     }
 })();
