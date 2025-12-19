@@ -3,7 +3,16 @@
 // ============================================================
 // IMPORTS
 // ============================================================
-import { getAuthToken, removeCachedToken } from './auth.js';
+import { 
+    getAuthToken, 
+    removeCachedToken, 
+    setupTokenRefreshAlarm, 
+    refreshTokenIfNeeded, 
+    ensureFreshToken,
+    setupServiceAccount,
+    isServiceAccountConfigured,
+    getServiceAccountEmail
+} from './auth.js';
 import { 
     createSheet, readSheet, appendRows, appendRowsToTab,
     getSheetTabs, createTab, writeHeadersToTab, ensureWeeklyTab,
@@ -92,6 +101,43 @@ function abortScrapeWait(tabId, reason = 'aborted') {
 // AUTH CHECK UTILITIES
 // ============================================================
 
+/**
+ * Wait for content script to be ready by pinging it
+ * @param {number} tabId - Tab ID to check
+ * @param {number} maxRetries - Maximum number of retry attempts
+ * @param {number} retryDelayMs - Delay between retries in milliseconds
+ * @returns {Promise<boolean>} True if content script is ready
+ */
+async function waitForContentScriptReady(tabId, maxRetries = 10, retryDelayMs = 1000) {
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try {
+            const response = await chrome.tabs.sendMessage(tabId, {
+                action: MESSAGE_ACTIONS.PING
+            });
+            if (response?.success || response?.status === 'alive') {
+                console.log(`${LOG} Content script ready (attempt ${attempt + 1})`);
+                return true;
+            }
+        } catch (error) {
+            // Expected error if content script not ready yet
+            if (error.message?.includes('Could not establish connection')) {
+                if (attempt < maxRetries - 1) {
+                    console.log(`${LOG} Content script not ready yet, waiting ${retryDelayMs}ms (attempt ${attempt + 1}/${maxRetries})...`);
+                    await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+                    continue;
+                } else {
+                    console.error(`${LOG} Content script never became ready after ${maxRetries} attempts`);
+                    return false;
+                }
+            } else {
+                // Unexpected error
+                throw error;
+            }
+        }
+    }
+    return false;
+}
+
 async function checkLinkedInAuthBeforeScrape(tabId, sourceName) {
     try {
         const authStatus = await chrome.tabs.sendMessage(tabId, {
@@ -140,10 +186,16 @@ async function performStartupAuthChecks() {
         // Non-interactive on startup to avoid popping auth UI unexpectedly.
         await getAuthToken(false);
     } catch (e) {
-        await notifyGoogleAuthExpired(
-            `Startup Google auth check failed (non-interactive): ${e?.message || String(e)}`,
-            null
-        ).catch(() => {});
+        // Only notify for configuration issues, not transient errors
+        const errorMsg = e?.message || String(e);
+        if (errorMsg.includes('not configured') || errorMsg.includes('missing required field') || errorMsg.includes('Service account')) {
+            await notifyGoogleAuthExpired(
+                `Service account not configured on startup: ${errorMsg}. Configure service account in extension popup.`,
+                null
+            ).catch(() => {});
+        }
+        // Otherwise, just log it (might be a transient network issue)
+        console.warn(`${LOG} Startup auth check failed (non-critical): ${errorMsg}`);
     }
 }
 
@@ -360,6 +412,15 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
                 chrome.alarms.clear(ALARM_NAMES.AUTO_RUN_KEEPALIVE);
             }
             break;
+
+        case ALARM_NAMES.TOKEN_REFRESH:
+            console.log(`${LOG} Token refresh check`);
+            try {
+                await refreshTokenIfNeeded();
+            } catch (e) {
+                console.warn(`${LOG} Token refresh check failed:`, e?.message || e);
+            }
+            break;
     }
 });
 
@@ -399,6 +460,19 @@ chrome.runtime.onStartup.addListener(async () => {
 // ============================================================
 async function executeScheduledRun(schedule) {
     console.log(`${LOG} Executing scheduled run for ${schedule.sourceName}`);
+    
+    // Ensure Google OAuth token is fresh before starting (prevents mid-scrape re-auth)
+    try {
+        await ensureFreshToken();
+        console.log(`${LOG} ✅ Google OAuth token verified before scheduled run`);
+    } catch (e) {
+        console.error(`${LOG} ❌ Failed to ensure fresh token before scheduled run: ${e.message}`);
+        await notifyGoogleAuthExpired(
+            `Cannot start scheduled run: Google authentication required. ${e.message}`,
+            schedule.sourceName
+        ).catch(() => {});
+        throw new Error(`Google authentication required: ${e.message}`);
+    }
     
     // Create execution record
     const execution = await addExecutionRecord({
@@ -694,6 +768,27 @@ async function processAutoRunQueue() {
         return;
     }
     
+    // Ensure Google OAuth token is fresh before processing (prevents mid-scrape re-auth)
+    // Only check once per auto-run session (not on every queue tick)
+    if (!state.tokenChecked) {
+        try {
+            await ensureFreshToken();
+            console.log(`${LOG} ✅ Google OAuth token verified before auto-run`);
+            state.tokenChecked = true;
+            await saveToStorage({ autoRunState: state });
+        } catch (e) {
+            console.error(`${LOG} ❌ Failed to ensure fresh token before auto-run: ${e.message}`);
+            await notifyGoogleAuthExpired(
+                `Cannot start auto-run: Google authentication required. ${e.message}`,
+                state.config?.sources?.[0] || 'Unknown'
+            ).catch(() => {});
+            state.isRunning = false;
+            state.error = `Google authentication required: ${e.message}`;
+            await saveToStorage({ autoRunState: state });
+            return;
+        }
+    }
+    
     const { config, progress } = state;
     const { sources, groupedSearches } = config;
     const maxPagesOverride = config?.scrapeOptions?.maxPages;
@@ -735,6 +830,12 @@ async function processAutoRunQueue() {
             
             // Wait for page load
             await new Promise(resolve => setTimeout(resolve, 6000));
+            
+            // Wait for content script to be ready before sending messages
+            const contentScriptReady = await waitForContentScriptReady(tab.id, 10, 1000);
+            if (!contentScriptReady) {
+                throw new Error(`Content script not ready after navigation to ${search.url}`);
+            }
 
             // Auth gate (LinkedIn signed out / checkpoint)
             const authCheck = await checkLinkedInAuthBeforeScrape(tab.id, source);
@@ -751,14 +852,21 @@ async function processAutoRunQueue() {
                 });
                 
                 // Wait for scraping to complete (listen for SCRAPING_COMPLETE)
-                const result = await waitForScrapingComplete(tab.id);
-                if (result?.aborted) {
+                // Reduced timeout to 30 minutes (was 30 min, keeping same but adding better logging)
+                const result = await waitForScrapingComplete(tab.id, 1800000);
+                
+                if (result?.timeout) {
+                    console.error(`${LOG} ⚠️ Scraping timed out after 30 minutes - content script may be stuck`);
+                    console.error(`${LOG} This usually means the scraper is stuck on the last page. Check content script logs.`);
+                    // Continue to next search anyway to prevent getting stuck
+                } else if (result?.aborted) {
                     console.log(`${LOG} Auto-run scrape aborted (${result.reason || 'unknown'})`);
                     return;
                 }
                 
             } catch (e) {
                 console.error(`${LOG} Scraping error:`, e);
+                // Continue to next search even on error to prevent getting stuck
             }
             
             // Update completed count
@@ -807,6 +915,27 @@ async function processManualScrape() {
     if (!state?.isRunning) {
         console.log(`${LOG} Manual scrape not active`);
         return;
+    }
+    
+    // Ensure Google OAuth token is fresh before starting (prevents mid-scrape re-auth)
+    // Only check once per manual scrape session
+    if (!state.tokenChecked) {
+        try {
+            await ensureFreshToken();
+            console.log(`${LOG} ✅ Google OAuth token verified before manual scrape`);
+            state.tokenChecked = true;
+            await saveToStorage({ manualScrapeState: state });
+        } catch (e) {
+            console.error(`${LOG} ❌ Failed to ensure fresh token before manual scrape: ${e.message}`);
+            await notifyGoogleAuthExpired(
+                `Cannot start manual scrape: Google authentication required. ${e.message}`,
+                state.sourceName || 'Unknown'
+            ).catch(() => {});
+            state.isRunning = false;
+            state.error = `Google authentication required: ${e.message}`;
+            await saveToStorage({ manualScrapeState: state });
+            return;
+        }
     }
     
     const { sourceName, searches, currentSearchIndex, workbookId } = state;
@@ -883,6 +1012,12 @@ async function processManualScrape() {
         
         // Wait for page load and content script injection
         await new Promise(resolve => setTimeout(resolve, 5000));
+        
+        // Wait for content script to be ready before sending messages
+        const contentScriptReady = await waitForContentScriptReady(tab.id, 10, 1000);
+        if (!contentScriptReady) {
+            throw new Error(`Content script not ready after navigation to ${search.url}`);
+        }
 
         // Auth gate (LinkedIn signed out / checkpoint)
         const authCheck = await checkLinkedInAuthBeforeScrape(tab.id, sourceName);
@@ -917,8 +1052,13 @@ async function processManualScrape() {
             });
             
             // Wait for scraping to complete
-            const result = await waitForScrapingComplete(tab.id);
-            if (result?.aborted) {
+            const result = await waitForScrapingComplete(tab.id, 1800000);
+            
+            if (result?.timeout) {
+                console.error(`${LOG} ⚠️ Scraping timed out after 30 minutes - content script may be stuck`);
+                console.error(`${LOG} This usually means the scraper is stuck on the last page. Check content script logs.`);
+                // Continue to next search anyway to prevent getting stuck
+            } else if (result?.aborted) {
                 console.log(`${LOG} Manual scrape aborted (${result.reason || 'unknown'})`);
                 return;
             }
@@ -930,14 +1070,34 @@ async function processManualScrape() {
             }
             
         } catch (e) {
-            console.error(`${LOG} Scraping error for search "${search.title}":`, e);
+            const errorMessage = e?.message || String(e) || 'Unknown error';
+            
+            // Check if it's a content script connection error
+            if (errorMessage.includes('Could not establish connection')) {
+                console.error(`${LOG} Content script connection error for search "${search.title}": ${errorMessage}`);
+                console.error(`${LOG} This usually means the content script wasn't injected or the tab navigated away`);
+                
+                // Try to check if tab still exists and is on LinkedIn
+                try {
+                    const tab = await chrome.tabs.get(tab.id);
+                    console.log(`${LOG} Tab status: id=${tab.id}, url=${tab.url}, status=${tab.status}`);
+                    
+                    if (!tab.url?.includes('linkedin.com')) {
+                        console.error(`${LOG} Tab is not on LinkedIn (${tab.url}), may have navigated away`);
+                    }
+                } catch (tabError) {
+                    console.error(`${LOG} Could not get tab info:`, tabError);
+                }
+            } else {
+                console.error(`${LOG} Scraping error for search "${search.title}":`, e);
+            }
             
             // Send webhook notification for scraping errors
             await notifyScrapeFailed(
                 'Search Process',
                 search.title || 'Unknown Search',
-                'network_error',
-                e?.message || String(e) || 'Unknown error',
+                errorMessage.includes('Could not establish connection') ? 'content_script_error' : 'network_error',
+                errorMessage,
                 {
                     sourceName: sourceName, // Connection Source from Input Sheet
                     searchUrl: search.url,
@@ -1323,14 +1483,48 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     const workbookUrl = message.workbookUrl;
                     if (!workbookUrl) throw new Error('Missing workbookUrl');
 
-                    const config = await loadWorkbookConfig(workbookUrl);
+                    try {
+                        console.log(`${LOG} ========================================`);
+                        console.log(`${LOG} 📥 LOAD_WORKBOOK request received`);
+                        console.log(`${LOG} Workbook URL: ${workbookUrl}`);
+                        console.log(`${LOG} ========================================`);
+                        
+                        // Verify token is available before attempting to load
+                        console.log(`${LOG} 🔍 Step 1: Checking token availability...`);
+                        try {
+                            const tokenCheck = await getAuthToken(false);
+                            console.log(`${LOG} ✅ Token available (non-interactive check passed)`);
+                        } catch (tokenError) {
+                            console.log(`${LOG} ⚠️ Token not available via non-interactive: ${tokenError.message}`);
+                            console.log(`${LOG} ℹ️ Will attempt interactive auth during workbook load if needed`);
+                        }
 
-                    // Create/refresh alarm AFTER successful load
-                    const syncInterval = await getSyncInterval();
-                    chrome.alarms.create(ALARM_NAMES.WORKBOOK_SYNC, { periodInMinutes: syncInterval });
+                        console.log(`${LOG} 🔍 Step 2: Calling loadWorkbookConfig...`);
+                        const config = await loadWorkbookConfig(workbookUrl);
+                        console.log(`${LOG} ✅ loadWorkbookConfig completed`);
 
-                    const stored = await getFromStorage([STORAGE_KEYS.LAST_SYNC_CHANGES]);
-                    response = { success: true, config, changes: stored[STORAGE_KEYS.LAST_SYNC_CHANGES] || null };
+                        console.log(`${LOG} 🔍 Step 3: Setting up sync alarm...`);
+                        // Create/refresh alarm AFTER successful load
+                        const syncInterval = await getSyncInterval();
+                        chrome.alarms.create(ALARM_NAMES.WORKBOOK_SYNC, { periodInMinutes: syncInterval });
+                        console.log(`${LOG} ✅ Sync alarm created (${syncInterval} min interval)`);
+
+                        console.log(`${LOG} 🔍 Step 4: Retrieving sync changes...`);
+                        const stored = await getFromStorage([STORAGE_KEYS.LAST_SYNC_CHANGES]);
+                        response = { success: true, config, changes: stored[STORAGE_KEYS.LAST_SYNC_CHANGES] || null };
+                        console.log(`${LOG} ========================================`);
+                        console.log(`${LOG} ✅ LOAD_WORKBOOK completed successfully`);
+                        console.log(`${LOG} Connections: ${config?.stats?.totalConnections || 0}`);
+                        console.log(`${LOG} Searches: ${config?.stats?.totalSearches || 0}`);
+                        console.log(`${LOG} ========================================`);
+                    } catch (error) {
+                        console.error(`${LOG} ========================================`);
+                        console.error(`${LOG} ❌ LOAD_WORKBOOK FAILED`);
+                        console.error(`${LOG} Error: ${error?.message || String(error)}`);
+                        console.error(`${LOG} Stack: ${error?.stack || 'No stack trace'}`);
+                        console.error(`${LOG} ========================================`);
+                        throw error; // Re-throw to be caught by outer handler
+                    }
                     break;
                 }
 
@@ -1367,6 +1561,57 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 case MESSAGE_ACTIONS.GET_SYNC_STATUS: {
                     const cfg = await getWorkbookConfig();
                     response = { success: true, status: cfg?.syncStatus || 'none' };
+                    break;
+                }
+
+                // --- SERVICE ACCOUNT ---
+                case MESSAGE_ACTIONS.GET_SERVICE_ACCOUNT_STATUS: {
+                    try {
+                        const configured = await isServiceAccountConfigured();
+                        const email = configured ? await getServiceAccountEmail() : null;
+                        
+                        let tokenValid = false;
+                        if (message.testConnection && configured) {
+                            try {
+                                await getAuthToken();
+                                tokenValid = true;
+                            } catch (tokenError) {
+                                response = { configured, email, tokenValid: false, error: tokenError.message };
+                                break;
+                            }
+                        }
+                        
+                        response = { configured, email, tokenValid };
+                    } catch (error) {
+                        console.error(`${LOG} Error getting service account status:`, error);
+                        response = { configured: false, error: error.message };
+                    }
+                    break;
+                }
+
+                case MESSAGE_ACTIONS.SETUP_SERVICE_ACCOUNT: {
+                    try {
+                        await setupServiceAccount(message.jsonKey);
+                        const email = await getServiceAccountEmail();
+                        console.log(`${LOG} Service account configured: ${email}`);
+                        response = { success: true, email };
+                    } catch (error) {
+                        console.error(`${LOG} Error setting up service account:`, error);
+                        response = { success: false, error: error.message };
+                    }
+                    break;
+                }
+
+                case MESSAGE_ACTIONS.CLEAR_SERVICE_ACCOUNT: {
+                    try {
+                        await chrome.storage.local.remove('serviceAccountCredentials');
+                        await removeCachedToken(); // Clear any cached tokens
+                        console.log(`${LOG} Service account credentials cleared`);
+                        response = { success: true };
+                    } catch (error) {
+                        console.error(`${LOG} Error clearing service account:`, error);
+                        response = { success: false, error: error.message };
+                    }
                     break;
                 }
                 
@@ -1730,6 +1975,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         // Startup auth checks (non-interactive)
         performStartupAuthChecks().catch(() => {});
+        
+        // Setup proactive token refresh alarm
+        setupTokenRefreshAlarm().catch(() => {});
         
         // Clean up stuck states (isRunning but actually not running)
         const storedStates = await getFromStorage(['autoRunState', 'manualScrapeState']);

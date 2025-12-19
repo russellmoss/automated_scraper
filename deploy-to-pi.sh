@@ -17,8 +17,15 @@
 # ------------------------------
 
 PI_USER="savvy-pirate"
-PI_HOST="192.168.3.232"          
 PI_EXTENSION_PATH="/home/savvy-pirate/extensions"
+
+# Connection modes - choose between local network or Tailscale VPN
+PI_HOST_LOCAL="savvy-pirate.local"        # Local network (or use: 192.168.3.232)
+PI_HOST_TAILSCALE="100.123.156.60"       # Tailscale VPN (or use: raspberrypi.tail925a98.ts.net)
+
+# Default connection mode (can be overridden with --local or --tailscale flags)
+# Options: "local" or "tailscale"
+DEFAULT_MODE="tailscale"
 
 # Local path to your extension (Windows path converted for Git Bash)
 # For Git Bash, use: /c/Users/YourName/path/to/savvy-pirate
@@ -209,7 +216,12 @@ EOF
 show_usage() {
     echo "Savvy Pirate Deployment Script"
     echo ""
-    echo "Usage: ./deploy-to-pi.sh [option]"
+    echo "Usage: ./deploy-to-pi.sh [connection-mode] [option]"
+    echo ""
+    echo "Connection Modes:"
+    echo "  --local, -l       Use local network connection (default: savvy-pirate.local)"
+    echo "  --tailscale, -t   Use Tailscale VPN connection (default: 100.123.156.60)"
+    echo "                    Default mode: tailscale"
     echo ""
     echo "Options:"
     echo "  (no option)    Full deployment: copy all files + restart Chromium"
@@ -219,11 +231,57 @@ show_usage() {
     echo "  --status       Show Pi status (Chromium running, file list)"
     echo "  --help         Show this help message"
     echo ""
+    echo "Examples:"
+    echo "  ./deploy-to-pi.sh --tailscale              # Full deploy via Tailscale"
+    echo "  ./deploy-to-pi.sh --local --quick          # Quick deploy via local network"
+    echo "  ./deploy-to-pi.sh -t --files-only          # Copy files via Tailscale"
+    echo ""
     echo "Configuration:"
     echo "  Edit the variables at the top of this script:"
-    echo "  - PI_HOST: Your Raspberry Pi's IP address"
+    echo "  - PI_HOST_LOCAL: Your Raspberry Pi's local network address"
+    echo "  - PI_HOST_TAILSCALE: Your Raspberry Pi's Tailscale address"
     echo "  - LOCAL_EXTENSION_PATH: Path to extension on your Windows machine"
 }
+
+# ------------------------------
+# Connection mode selection
+# ------------------------------
+
+# Initialize connection mode
+CONNECTION_MODE="${DEFAULT_MODE}"
+DEPLOY_OPTION=""
+
+# Parse all arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --local|-l)
+            CONNECTION_MODE="local"
+            shift
+            ;;
+        --tailscale|-t)
+            CONNECTION_MODE="tailscale"
+            shift
+            ;;
+        --files-only|--quick|--restart|--status|--help)
+            DEPLOY_OPTION="$1"
+            shift
+            ;;
+        *)
+            log_error "Unknown option: $1"
+            show_usage
+            exit 1
+            ;;
+    esac
+done
+
+# Set PI_HOST based on selected mode
+if [ "$CONNECTION_MODE" == "local" ]; then
+    PI_HOST="${PI_HOST_LOCAL}"
+    CONNECTION_NAME="Local Network"
+else
+    PI_HOST="${PI_HOST_TAILSCALE}"
+    CONNECTION_NAME="Tailscale VPN"
+fi
 
 # ------------------------------
 # Main script
@@ -234,10 +292,13 @@ echo "=========================================="
 echo "  Savvy Pirate → Raspberry Pi Deployer"
 echo "=========================================="
 echo ""
+log_info "Connection Mode: ${CONNECTION_NAME}"
+log_info "Target Host: ${PI_HOST}"
+echo ""
 
 # Validate configuration
-if [[ "$PI_HOST" == *"XXX"* ]]; then
-    log_error "Please edit the script and set PI_HOST to your Pi's IP address"
+if [[ -z "$PI_HOST" ]] || [[ "$PI_HOST" == *"XXX"* ]]; then
+    log_error "Please edit the script and set PI_HOST_LOCAL and PI_HOST_TAILSCALE to your Pi's addresses"
     exit 1
 fi
 
@@ -246,8 +307,8 @@ if [[ "$LOCAL_EXTENSION_PATH" == *"YourName"* ]]; then
     exit 1
 fi
 
-# Parse arguments
-case "${1}" in
+# Execute deployment based on option
+case "${DEPLOY_OPTION}" in
     --files-only)
         copy_all_files
         log_success "Deployment complete (files only - remember to reload extension manually)"
@@ -272,11 +333,6 @@ case "${1}" in
         copy_all_files
         restart_chromium
         log_success "Full deployment complete!"
-        ;;
-    *)
-        log_error "Unknown option: ${1}"
-        show_usage
-        exit 1
         ;;
 esac
 

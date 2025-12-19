@@ -109,6 +109,131 @@ function getWorkbookLabel(w) {
     return w.title || w.name || w.id;
 }
 
+// ============================================================
+// SERVICE ACCOUNT FUNCTIONS
+// ============================================================
+
+async function loadServiceAccountStatus() {
+    const statusEl = document.getElementById('service-account-status');
+    const setupEl = document.getElementById('service-account-setup');
+    const configuredEl = document.getElementById('service-account-configured');
+    const testResultEl = document.getElementById('service-account-test-result');
+    
+    try {
+        const response = await sendMessage('GET_SERVICE_ACCOUNT_STATUS');
+        
+        if (response.configured) {
+            statusEl.className = 'info-box mb-2 configured';
+            statusEl.innerHTML = `
+                <span class="status-indicator">Connected</span>
+                <div class="service-account-email">${response.email}</div>
+            `;
+            setupEl.classList.add('hidden');
+            configuredEl.classList.remove('hidden');
+        } else {
+            statusEl.className = 'info-box mb-2 not-configured';
+            statusEl.innerHTML = `<span class="status-indicator">Not configured</span>`;
+            setupEl.classList.remove('hidden');
+            configuredEl.classList.add('hidden');
+        }
+        testResultEl.classList.add('hidden');
+    } catch (error) {
+        console.error('[POPUP] Error loading service account status:', error);
+        statusEl.className = 'info-box mb-2 error';
+        statusEl.innerHTML = `<span class="status-indicator">Error: ${error.message}</span>`;
+    }
+}
+
+async function saveServiceAccount() {
+    const jsonInput = document.getElementById('service-account-json');
+    const jsonText = jsonInput.value.trim();
+    
+    if (!jsonText) {
+        showToast('Please paste your service account JSON key', 'error');
+        return;
+    }
+    
+    // Validate it's valid JSON
+    try {
+        JSON.parse(jsonText);
+    } catch (e) {
+        showToast('Invalid JSON format. Please paste the complete JSON key file contents.', 'error');
+        return;
+    }
+    
+    const btn = document.getElementById('save-service-account-btn');
+    setButtonLoading(btn, true);
+    
+    try {
+        const response = await sendMessage('SETUP_SERVICE_ACCOUNT', { jsonKey: jsonText });
+        
+        if (response.success) {
+            showToast(`Service account configured: ${response.email}`, 'success');
+            jsonInput.value = ''; // Clear the textarea
+            await loadServiceAccountStatus(); // Refresh display
+        } else {
+            showToast(`Failed: ${response.error}`, 'error');
+        }
+    } catch (error) {
+        console.error('[POPUP] Error saving service account:', error);
+        showToast(`Error: ${error.message}`, 'error');
+    } finally {
+        setButtonLoading(btn, false);
+    }
+}
+
+async function testServiceAccount() {
+    const testResultEl = document.getElementById('service-account-test-result');
+    testResultEl.classList.remove('hidden');
+    testResultEl.className = 'info-box mt-2';
+    testResultEl.textContent = 'Testing connection...';
+    
+    const btn = document.getElementById('test-service-account-btn');
+    setButtonLoading(btn, true);
+    
+    try {
+        // Request a token to verify credentials work
+        const response = await sendMessage('GET_SERVICE_ACCOUNT_STATUS', { testConnection: true });
+        
+        if (response.tokenValid) {
+            testResultEl.className = 'info-box mt-2 configured';
+            testResultEl.innerHTML = `<span class="status-indicator">✓ Connection successful! Token obtained.</span>`;
+        } else {
+            testResultEl.className = 'info-box mt-2 error';
+            testResultEl.innerHTML = `<span class="status-indicator">✗ ${response.error || 'Failed to obtain token'}</span>`;
+        }
+    } catch (error) {
+        testResultEl.className = 'info-box mt-2 error';
+        testResultEl.innerHTML = `<span class="status-indicator">✗ Error: ${error.message}</span>`;
+    } finally {
+        setButtonLoading(btn, false);
+    }
+}
+
+async function clearServiceAccount() {
+    if (!confirm('Are you sure you want to clear the service account credentials? You will need to reconfigure authentication.')) {
+        return;
+    }
+    
+    const btn = document.getElementById('clear-service-account-btn');
+    setButtonLoading(btn, true);
+    
+    try {
+        const response = await sendMessage('CLEAR_SERVICE_ACCOUNT');
+        
+        if (response.success) {
+            showToast('Service account credentials cleared', 'success');
+            await loadServiceAccountStatus();
+        } else {
+            showToast(`Failed: ${response.error}`, 'error');
+        }
+    } catch (error) {
+        showToast(`Error: ${error.message}`, 'error');
+    } finally {
+        setButtonLoading(btn, false);
+    }
+}
+
 /**
  * Show toast notification
  */
@@ -194,7 +319,13 @@ async function loadWorkbookConfigFromPopup() {
 
     setButtonLoading(elements.loadWorkbookBtn, true);
     try {
+        console.log('[POPUP] Loading workbook:', url);
         const r = await sendMessage('LOAD_WORKBOOK', { workbookUrl: url });
+        
+        if (!r || !r.success) {
+            throw new Error(r?.error || 'Failed to load workbook');
+        }
+        
         state.workbookConfig = r.config || null;
         state.lastSyncChanges = r.changes || null;
         renderSyncStatus(state.workbookConfig);
@@ -203,7 +334,9 @@ async function loadWorkbookConfigFromPopup() {
 
         await loadInitialData();
     } catch (e) {
-        showToast(e.message, 'error');
+        console.error('[POPUP] Load workbook error:', e);
+        const errorMsg = e?.message || String(e) || 'Unknown error';
+        showToast(`Failed to load workbook: ${errorMsg}`, 'error');
     } finally {
         setButtonLoading(elements.loadWorkbookBtn, false);
     }
@@ -427,6 +560,9 @@ function syncDropdownsToTimeInput() {
 
 async function loadInitialData() {
     try {
+        // Load service account status first (critical for all operations)
+        await loadServiceAccountStatus();
+        
         // Live Sync: load workbook config + last changes (non-fatal)
         const cfg = await sendMessage('GET_WORKBOOK_CONFIG').catch(() => ({ config: null, lastChanges: null }));
         state.workbookConfig = cfg.config || null;
@@ -495,6 +631,11 @@ function setupEventListeners() {
             toggleSection(sectionId);
         });
     });
+    
+    // Service Account buttons
+    document.getElementById('save-service-account-btn')?.addEventListener('click', saveServiceAccount);
+    document.getElementById('test-service-account-btn')?.addEventListener('click', testServiceAccount);
+    document.getElementById('clear-service-account-btn')?.addEventListener('click', clearServiceAccount);
     
     // Live Sync (Workbook Config)
     elements.loadWorkbookBtn.addEventListener('click', loadWorkbookConfigFromPopup);

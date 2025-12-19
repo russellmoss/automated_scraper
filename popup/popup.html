@@ -18,6 +18,48 @@
     </header>
     
     <main class="main-content">
+        <!-- SECTION: Service Account Configuration -->
+        <section class="section" id="section-service-account">
+            <div class="section-header" data-section="service-account">
+                <span>🔑 Google Service Account</span>
+                <span class="chevron">▼</span>
+            </div>
+            <div class="section-content">
+                <!-- Status Display -->
+                <div id="service-account-status" class="info-box mb-2">
+                    <span class="status-indicator">Checking...</span>
+                </div>
+                
+                <!-- Configuration Form (shown when not configured) -->
+                <div id="service-account-setup" class="hidden">
+                    <div class="form-group">
+                        <label for="service-account-json">Paste Service Account JSON Key:</label>
+                        <textarea 
+                            id="service-account-json" 
+                            class="json-textarea" 
+                            rows="6" 
+                            placeholder='{"type": "service_account", "client_email": "...", ...}'
+                        ></textarea>
+                        <span class="form-hint">Paste the entire contents of your service account JSON key file</span>
+                    </div>
+                    <div class="input-group">
+                        <button id="save-service-account-btn" class="btn btn-primary">Save Credentials</button>
+                    </div>
+                </div>
+                
+                <!-- Configured State (shown when configured) -->
+                <div id="service-account-configured" class="hidden">
+                    <div class="input-group">
+                        <button id="test-service-account-btn" class="btn btn-secondary">Test Connection</button>
+                        <button id="clear-service-account-btn" class="btn btn-outline">Clear Credentials</button>
+                    </div>
+                </div>
+                
+                <!-- Test Results -->
+                <div id="service-account-test-result" class="info-box mt-2 hidden"></div>
+            </div>
+        </section>
+        
         <!-- SECTION: Workbook Configuration (Live Sync) -->
         <section class="section" id="section-workbook-config">
             <div class="section-header" data-section="workbook-config">

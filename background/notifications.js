@@ -65,7 +65,7 @@ function generateMessage(type, data) {
         // Auth monitoring
         'auth_linkedin_signout': `🔐 LINKEDIN SIGNED OUT - Manual login required. ${data.details || ''}`.trim(),
         'auth_linkedin_checkpoint': `⚠️ LINKEDIN SECURITY CHALLENGE - Manual intervention required. ${data.details || ''}`.trim(),
-        'auth_google_expired': `🔑 GOOGLE AUTH REQUIRED - Re-authentication required. ${data.details || ''}`.trim()
+        'auth_google_expired': `🔑 GOOGLE SERVICE ACCOUNT ERROR - ${data.details || 'Service account configuration or permissions issue'}`.trim()
     };
     
     return messages[type] || `Notification: ${type}`;
@@ -452,8 +452,8 @@ export async function notifyGoogleAuthExpired(details, sourceName = null) {
 
     const success = await sendNotification(type, {
         sourceName: sourceName || 'N/A',
-        details: details || 'Google OAuth token expired or requires re-auth',
-        requiresAction: 'Re-authenticate Google in the Pi browser (Chrome identity)',
+        details: details || 'Service account configuration or permissions issue',
+        requiresAction: 'Check service account configuration in extension popup, or share Google Sheet with service account email',
         detectedAt: new Date().toISOString()
     });
 

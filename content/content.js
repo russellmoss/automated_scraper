@@ -652,9 +652,31 @@
 
     function detectPaginationState() {
         const nextButton = document.querySelector(SELECTORS.NEXT_BUTTON);
+        
+        // Check if button exists and is enabled
+        const hasNext = nextButton !== null && !nextButton.disabled;
+        
+        // Additional check: if button exists but has aria-disabled="true", it's disabled
+        const isAriaDisabled = nextButton?.getAttribute('aria-disabled') === 'true';
+        
+        // Check if button is visually hidden (LinkedIn sometimes hides it on last page)
+        const isHidden = nextButton && (
+            nextButton.offsetParent === null || 
+            nextButton.style.display === 'none' ||
+            window.getComputedStyle(nextButton).display === 'none'
+        );
+        
+        const actuallyHasNext = hasNext && !isAriaDisabled && !isHidden;
+        
         return {
-            hasNext: nextButton !== null && !nextButton.disabled,
-            button: nextButton
+            hasNext: actuallyHasNext,
+            button: nextButton,
+            details: {
+                exists: nextButton !== null,
+                disabled: nextButton?.disabled || false,
+                ariaDisabled: isAriaDisabled,
+                hidden: isHidden
+            }
         };
     }
 
@@ -741,8 +763,20 @@
         
         try {
             while (totalPages < maxPages && !stopRequested) {
-                // Wait for entries to load
-                await waitForEntriesToLoad(1, 20000);
+                // Wait for entries to load (with timeout handling)
+                const entriesLoaded = await waitForEntriesToLoad(1, 20000);
+                
+                if (!entriesLoaded) {
+                    console.warn('[CS] ⚠️ Timeout waiting for entries to load - checking if we're on last page');
+                    // Check pagination state - if no next button, we're done
+                    const pagination = detectPaginationState();
+                    if (!pagination.hasNext) {
+                        console.log('[CS] ✅ No next button found after timeout - assuming last page');
+                        break;
+                    }
+                    // If there's a next button but entries didn't load, continue anyway (might be slow loading)
+                    console.log('[CS] ⚠️ Entries didn't load but next button exists - continuing');
+                }
                 
                 // Scrape current page
                 const rows = await scrapeCurrentPage(sourceName);
@@ -759,6 +793,14 @@
                     });
                     
                     console.log(`[CS] ✅ Page ${totalPages}: Scraped ${rows.length} profiles (Total: ${totalProfiles})`);
+                } else {
+                    // If we scraped 0 profiles, check if we're on the last page
+                    console.warn('[CS] ⚠️ No profiles found on this page');
+                    const pagination = detectPaginationState();
+                    if (!pagination.hasNext) {
+                        console.log('[CS] ✅ No profiles and no next button - assuming last page');
+                        break;
+                    }
                 }
                 
                 if (stopRequested) {

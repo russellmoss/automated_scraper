@@ -1,6 +1,14 @@
 # Sensitive files (OAuth credentials)
 manifest.json
 
+# Service Account JSON keys (contains private keys)
+# Ignore actual service account keys (typically named with project-id and hash like: project-name-hash.json)
+config/*-*.json
+config/service-account-key.json
+# Allow template/example files
+!config/*.template.json
+!config/*.example.json
+
 # OS files
 .DS_Store
 .DS_Store?

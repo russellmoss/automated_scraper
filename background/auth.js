@@ -1,121 +1,240 @@
-// background/auth.js - OAuth Token Management (Chromium-safe)
-//
-// Why this exists:
-// - On some Chromium/Linux (incl. common Raspberry Pi builds), `chrome.identity.getAuthToken()`
-//   can fail with "The user is not signed in." even after Google login.
-// - `launchWebAuthFlow` works reliably with a "Web application" OAuth client + redirect URI:
-//   https://<EXTENSION_ID>.chromiumapp.org/
+// background/auth.js - Service Account Authentication for Google APIs
+// Replaces chrome.identity OAuth with service account JWT authentication
 
 const LOG = '[AUTH]';
-const TOKEN_STORAGE_KEY = 'oauth_access_token';
-const TOKEN_EXPIRY_KEY = 'oauth_token_expiry';
+const STORAGE_KEY = 'serviceAccountCredentials';
+const TOKEN_URL = 'https://oauth2.googleapis.com/token';
+const SCOPES = [
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/drive.file'
+].join(' ');
 
-async function getCachedToken() {
-    const result = await chrome.storage.local.get([TOKEN_STORAGE_KEY, TOKEN_EXPIRY_KEY]);
-    const token = result[TOKEN_STORAGE_KEY];
-    const expiry = result[TOKEN_EXPIRY_KEY];
+// In-memory token cache
+let cachedToken = null;
+let tokenExpiry = null;
 
-    if (token && expiry && Date.now() < expiry) {
-        return token;
-    }
-    return null;
-}
-
-async function launchWebAuthFlowAuth() {
-    const manifest = chrome.runtime.getManifest();
-    const clientId = manifest.oauth2?.client_id;
-    if (!clientId) {
-        throw new Error('No OAuth client_id in manifest.oauth2');
-    }
-
-    const redirectUri = chrome.identity.getRedirectURL();
-    const scopes = Array.isArray(manifest.oauth2?.scopes) && manifest.oauth2.scopes.length > 0
-        ? manifest.oauth2.scopes.join(' ')
-        : 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file';
-
-    const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
-    authUrl.searchParams.set('client_id', clientId);
-    authUrl.searchParams.set('redirect_uri', redirectUri);
-    authUrl.searchParams.set('response_type', 'token');
-    authUrl.searchParams.set('scope', scopes);
-    authUrl.searchParams.set('prompt', 'consent');
-
-    console.log(`${LOG} Starting launchWebAuthFlow...`);
-    console.log(`${LOG} Redirect URI: ${redirectUri}`);
-
-    const responseUrl = await new Promise((resolve, reject) => {
-        chrome.identity.launchWebAuthFlow(
-            { url: authUrl.toString(), interactive: true },
-            (url) => {
-                if (chrome.runtime.lastError) {
-                    reject(new Error(chrome.runtime.lastError.message));
-                    return;
-                }
-                if (!url) {
-                    reject(new Error('No response URL from launchWebAuthFlow'));
-                    return;
-                }
-                resolve(url);
-            }
-        );
-    });
-
-    const url = new URL(responseUrl);
-    const params = new URLSearchParams(url.hash?.startsWith('#') ? url.hash.substring(1) : url.hash);
-    const accessToken = params.get('access_token');
-    const expiresIn = params.get('expires_in');
-    const error = params.get('error') || url.searchParams.get('error');
-    const errorDescription = params.get('error_description') || url.searchParams.get('error_description');
-
-    if (!accessToken) {
-        if (error) {
-            if (error === 'redirect_uri_mismatch') {
-                throw new Error(
-                    `OAuth error: redirect_uri_mismatch. Add this exact redirect URI to your Google Cloud OAuth client authorized redirect URIs: ${redirectUri}`
-                );
-            }
-            throw new Error(`OAuth error: ${error}${errorDescription ? ` (${errorDescription})` : ''}`);
+/**
+ * Store service account credentials in chrome.storage.local
+ * Call this once during setup with the contents of your JSON key file
+ * @param {Object|string} jsonKeyContent - The service account JSON key (parsed object or string)
+ */
+export async function setupServiceAccount(jsonKeyContent) {
+    const credentials = typeof jsonKeyContent === 'string' 
+        ? JSON.parse(jsonKeyContent) 
+        : jsonKeyContent;
+    
+    // Validate required fields
+    const required = ['client_email', 'private_key', 'token_uri'];
+    for (const field of required) {
+        if (!credentials[field]) {
+            throw new Error(`Service account JSON missing required field: ${field}`);
         }
-        throw new Error('No access_token in OAuth response');
     }
-
-    // Store token with a small safety buffer (60s)
-    const expiry = Date.now() + (parseInt(expiresIn || '3600', 10) * 1000) - 60000;
-    await chrome.storage.local.set({
-        [TOKEN_STORAGE_KEY]: accessToken,
-        [TOKEN_EXPIRY_KEY]: expiry
-    });
-
-    console.log(`${LOG} Token obtained, expires in ${expiresIn || '3600'}s`);
-    return accessToken;
+    
+    await chrome.storage.local.set({ [STORAGE_KEY]: credentials });
+    console.log(`${LOG} Service account credentials stored for: ${credentials.client_email}`);
+    
+    // Clear any cached token so next request uses new credentials
+    cachedToken = null;
+    tokenExpiry = null;
+    
+    return true;
 }
 
 /**
- * Get OAuth access token.
- * - If cached token exists and is valid, returns it.
- * - If interactive=false and no cached token, throws.
- * - If interactive=true and no cached token, runs OAuth flow via launchWebAuthFlow.
+ * Check if service account is configured
+ * @returns {Promise<boolean>}
+ */
+export async function isServiceAccountConfigured() {
+    const result = await chrome.storage.local.get(STORAGE_KEY);
+    return !!(result[STORAGE_KEY]?.client_email && result[STORAGE_KEY]?.private_key);
+}
+
+/**
+ * Get stored service account credentials
+ * @returns {Promise<Object>}
+ */
+async function getCredentials() {
+    const result = await chrome.storage.local.get(STORAGE_KEY);
+    if (!result[STORAGE_KEY]) {
+        throw new Error('Service account not configured. Call setupServiceAccount() first.');
+    }
+    return result[STORAGE_KEY];
+}
+
+/**
+ * Convert a PEM private key to CryptoKey for signing
+ * @param {string} pem - PEM formatted private key
+ * @returns {Promise<CryptoKey>}
+ */
+async function importPrivateKey(pem) {
+    // Remove PEM header/footer and newlines
+    const pemContents = pem
+        .replace(/-----BEGIN PRIVATE KEY-----/, '')
+        .replace(/-----END PRIVATE KEY-----/, '')
+        .replace(/\s/g, '');
+    
+    // Decode base64 to ArrayBuffer
+    const binaryString = atob(pemContents);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+    }
+    
+    // Import as CryptoKey
+    return crypto.subtle.importKey(
+        'pkcs8',
+        bytes.buffer,
+        {
+            name: 'RSASSA-PKCS1-v1_5',
+            hash: 'SHA-256'
+        },
+        false,
+        ['sign']
+    );
+}
+
+/**
+ * Base64URL encode (URL-safe base64 without padding)
+ * @param {ArrayBuffer|Uint8Array|string} data
+ * @returns {string}
+ */
+function base64UrlEncode(data) {
+    let base64;
+    if (typeof data === 'string') {
+        base64 = btoa(data);
+    } else {
+        const bytes = new Uint8Array(data);
+        let binary = '';
+        for (let i = 0; i < bytes.length; i++) {
+            binary += String.fromCharCode(bytes[i]);
+        }
+        base64 = btoa(binary);
+    }
+    return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/**
+ * Create and sign a JWT for Google OAuth
+ * @param {Object} credentials - Service account credentials
+ * @returns {Promise<string>} Signed JWT
+ */
+async function createSignedJwt(credentials) {
+    const now = Math.floor(Date.now() / 1000);
+    
+    const header = {
+        alg: 'RS256',
+        typ: 'JWT'
+    };
+    
+    const payload = {
+        iss: credentials.client_email,
+        scope: SCOPES,
+        aud: TOKEN_URL,
+        iat: now,
+        exp: now + 3600 // 1 hour
+    };
+    
+    const encodedHeader = base64UrlEncode(JSON.stringify(header));
+    const encodedPayload = base64UrlEncode(JSON.stringify(payload));
+    const signatureInput = `${encodedHeader}.${encodedPayload}`;
+    
+    // Sign with private key
+    const privateKey = await importPrivateKey(credentials.private_key);
+    const signatureBuffer = await crypto.subtle.sign(
+        'RSASSA-PKCS1-v1_5',
+        privateKey,
+        new TextEncoder().encode(signatureInput)
+    );
+    
+    const encodedSignature = base64UrlEncode(signatureBuffer);
+    
+    return `${signatureInput}.${encodedSignature}`;
+}
+
+/**
+ * Exchange JWT for access token
+ * @param {string} jwt - Signed JWT
+ * @returns {Promise<{access_token: string, expires_in: number}>}
+ */
+async function exchangeJwtForToken(jwt) {
+    const response = await fetch(TOKEN_URL, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${jwt}`
+    });
+    
+    if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`${LOG} Token exchange failed:`, errorText);
+        throw new Error(`Token exchange failed: ${response.status} - ${errorText}`);
+    }
+    
+    return response.json();
+}
+
+/**
+ * Get OAuth access token (main export - maintains same signature as before)
+ * @param {boolean} interactive - Ignored for service accounts (kept for API compatibility)
+ * @returns {Promise<string>} Access token
  */
 export async function getAuthToken(interactive = false) {
-    const cached = await getCachedToken();
-    if (cached) {
-        console.log(`${LOG} Using cached token`);
-        return cached;
+    // Check if we have a valid cached token (with 5 min buffer)
+    if (cachedToken && tokenExpiry && Date.now() < tokenExpiry - 300000) {
+        console.log(`${LOG} Using cached token (expires in ${Math.round((tokenExpiry - Date.now()) / 60000)} min)`);
+        return cachedToken;
     }
-
-    if (!interactive) {
-        throw new Error('No cached token and interactive=false');
-    }
-
-    return await launchWebAuthFlowAuth();
+    
+    console.log(`${LOG} Fetching new access token via service account...`);
+    
+    const credentials = await getCredentials();
+    const jwt = await createSignedJwt(credentials);
+    const tokenResponse = await exchangeJwtForToken(jwt);
+    
+    // Cache the token
+    cachedToken = tokenResponse.access_token;
+    tokenExpiry = Date.now() + (tokenResponse.expires_in * 1000);
+    
+    console.log(`${LOG} Token obtained successfully (expires in ${tokenResponse.expires_in}s)`);
+    return cachedToken;
 }
 
 /**
- * Remove cached token (call when token is invalid/expired).
- * @param {string} token - (ignored) kept for backward compatibility
+ * Remove cached token (for API compatibility)
+ * @param {string} token - Token to remove (ignored, just clears cache)
  */
 export async function removeCachedToken(token) {
-    await chrome.storage.local.remove([TOKEN_STORAGE_KEY, TOKEN_EXPIRY_KEY]);
-    console.log(`${LOG} Token cache cleared`);
+    console.log(`${LOG} Clearing cached token`);
+    cachedToken = null;
+    tokenExpiry = null;
 }
 
+/**
+ * Get service account email (useful for debugging)
+ * @returns {Promise<string|null>}
+ */
+export async function getServiceAccountEmail() {
+    try {
+        const credentials = await getCredentials();
+        return credentials.client_email;
+    } catch {
+        return null;
+    }
+}
+
+// Legacy exports for compatibility (no longer used but kept to avoid breaking imports)
+export async function setupTokenRefreshAlarm() {
+    console.log(`${LOG} Token refresh alarm not needed for service accounts (tokens auto-refresh on demand)`);
+}
+
+export async function refreshTokenIfNeeded() {
+    // Service accounts refresh tokens automatically when needed
+    return cachedToken;
+}
+
+export async function ensureFreshToken() {
+    // Just get a token (will refresh if needed)
+    return await getAuthToken(false);
+}

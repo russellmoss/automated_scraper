@@ -64,7 +64,7 @@ The extension uses a **three-layer architecture**:
 
 2. **Service Worker** (`background/service_worker.js`)
    - Main orchestration hub (always running in background)
-   - Manages OAuth authentication
+   - Manages Google Service Account authentication (JWT-based, no user interaction)
    - Handles scheduling and queue processing
    - Coordinates manual and automated scraping
    - Sends notifications via webhooks
@@ -203,10 +203,11 @@ In the side panel popup, use **📘 Workbook Configuration (Live Sync)**:
     - `1st & 3rd week of month`
     - `2nd & 4th week of month`
 
-- **OAuth / Google login prompts or errors**
-  - Chromium/Raspberry Pi requires a **Web application** OAuth client and an authorized redirect URI:
-    - `https://<EXTENSION_ID>.chromiumapp.org/`
-  - If you get `redirect_uri_mismatch`, add the current extension ID’s redirect URI to Google Cloud and reload the extension
+- **Service Account / Authentication errors**
+  - Ensure service account JSON key is properly configured in the extension popup (🔑 Google Service Account section)
+  - Verify the service account email has access to all Google Sheets (master workbook + output workbooks)
+  - Check service worker console for detailed error messages
+  - **Recommendation**: Use Service Account authentication for better reliability (no OAuth popups or expiry issues)
 
 ### Webhook Notifications
 
@@ -224,15 +225,34 @@ Before using this extension, you need:
 1. **Google Cloud Project** with:
    - Google Sheets API enabled
    - Google Drive API enabled
-   - OAuth 2.0 Client ID (**Web application** type) ✅ Recommended (works on Raspberry Pi Chromium)
-   - Authorized redirect URIs include: `https://<EXTENSION_ID>.chromiumapp.org/`
-     - You get `<EXTENSION_ID>` from `chrome://extensions` after loading the unpacked extension
+   - **Google Service Account** (recommended) OR OAuth 2.0 Client ID for legacy OAuth
 
-2. **Chrome Browser** (Manifest V3 compatible)
+2. **Chrome/Chromium Browser** (Manifest V3 compatible)
 
-3. **Google Account** with access to Google Sheets
+3. **Google Account** with access to Google Sheets (for sharing sheets with service account)
 
 4. **Zapier Webhook URL** (optional, for notifications)
+
+## Google Authentication Setup
+
+Savvy Pirate uses **Google Service Account authentication** for reliable, non-interactive access to Google Sheets. This replaces the previous OAuth method which required browser sign-in and could expire during long scrapes.
+
+### Why Service Account Authentication?
+
+**Advantages over OAuth:**
+- ✅ **No user interaction** - Tokens refresh automatically, never expire mid-scrape
+- ✅ **Works reliably on Chromium/Pi** - No browser OAuth dependencies or hanging issues
+- ✅ **More robust** - No popups, no sign-in prompts, no token expiry interruptions
+- ✅ **Better for automation** - Perfect for scheduled scrapes on Raspberry Pi
+- ✅ **Same setup everywhere** - Works identically on Chrome and Chromium
+
+**How It Works:**
+1. Extension creates a JWT (JSON Web Token) signed with the service account private key
+2. Exchanges JWT for an access token via Google's OAuth endpoint
+3. Caches tokens in memory and auto-refreshes before expiry (5-minute buffer)
+4. No browser popups or user interaction required
+
+---
 
 ## Installation
 
@@ -245,102 +265,131 @@ cd automated_scraper
 
 ### Step 2: Create Your manifest.json
 
-⚠️ **IMPORTANT**: `manifest.json` is in `.gitignore` for security because it contains your OAuth Client ID.
+⚠️ **IMPORTANT**: `manifest.json` is in `.gitignore` for security.
 
 1. Copy the template file:
    ```bash
    cp manifest-template.json manifest.json
    ```
 
-2. Edit `manifest.json` and replace `YOUR_CLIENT_ID.apps.googleusercontent.com` with your actual OAuth 2.0 Client ID from Google Cloud Console.
+2. The `manifest.json` file is already configured. **Service Account authentication doesn't require OAuth configuration in the manifest** - credentials are stored securely in extension storage.
 
-   Your `manifest.json` should look like this:
-   ```json
-   {
-     "oauth2": {
-       "client_id": "123456789-abc123xyz.apps.googleusercontent.com",
-       ...
-     }
-   }
-   ```
-
-### Step 3: Get Your OAuth 2.0 Client ID
+### Step 3: Create a Google Service Account
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com)
 2. Select your project (or create a new one)
-3. Navigate to **APIs & Services** > **Credentials**
-4. Click **Create Credentials** > **OAuth client ID**
-5. Choose **Chrome extension** as the application type
-6. You'll need your Extension ID (see Step 4)
-7. Copy the Client ID (it will look like: `123456789-abc123xyz.apps.googleusercontent.com`)
-8. Add this Client ID to your `manifest.json`
+3. **Enable APIs:**
+   - Go to **APIs & Services** > **Library**
+   - Search for "Google Sheets API" → Click **Enable**
+   - Search for "Google Drive API" → Click **Enable**
 
-### Step 4: Load the Extension in Chrome
+4. **Create a Service Account:**
+   - Go to **APIs & Services** > **Credentials**
+   - Click **Create Credentials** > **Service Account**
+   - Enter a name (e.g., "Savvy Pirate Extension")
+   - Click **Create and Continue**
+   - Skip optional steps (or add description if desired)
+   - Click **Done**
 
-1. Open Chrome and go to `chrome://extensions/`
-2. Enable **Developer mode** (toggle in top right)
-3. Click **Load unpacked**
-4. Select the `automated_scraper` directory
-5. Copy the **Extension ID** shown on the extensions page (you'll need this for OAuth setup)
-6. Go back to Google Cloud Console and add this Extension ID to your OAuth credentials
+5. **Create a JSON Key:**
+   - Click on the service account you just created
+   - Go to the **Keys** tab
+   - Click **Add Key** > **Create new key**
+   - Choose **JSON** format
+   - Click **Create** (this downloads the JSON key file)
+   - **⚠️ Save this file securely** - you'll need it in Step 4
 
-### Step 5: Configure OAuth Consent Screen
+6. **Note the Service Account Email:**
+   - The service account email looks like: `savvy-pirate-extension@your-project.iam.gserviceaccount.com`
+   - You'll need to share your Google Sheets with this email address (see Step 5)
 
-1. In Google Cloud Console, go to **APIs & Services** > **OAuth consent screen**
-2. Choose **Internal** or **External** (depending on your Google Workspace)
-3. Fill in required fields:
-   - App name: "Savvy Pirate"
-   - User support email: Your email
-   - Developer contact: Your email
-4. Add scopes:
-   - `https://www.googleapis.com/auth/spreadsheets`
-   - `https://www.googleapis.com/auth/drive.file`
-5. Save and continue
+### Step 4: Configure Service Account in Extension
+
+1. **Load the extension:**
+   - Open Chrome/Chromium and go to `chrome://extensions` (or `chromium://extensions`)
+   - Enable **Developer mode** (toggle in top-right)
+   - Click **Load unpacked**
+   - Select the extension directory
+
+2. **Open the extension popup:**
+   - Click the extension icon to open the side panel
+   - You should see **🔑 Google Service Account** section at the top
+
+3. **Get your JSON key content:**
+   - **If on your computer**: Open the downloaded JSON file in a text editor
+   - **If on Raspberry Pi**: SSH in and copy it:
+     ```bash
+     ssh savvy-pirate@100.123.156.60 "cat /home/savvy-pirate/extensions/config/service-account-key.json"
+     ```
+   - Copy the **entire JSON content** (it should start with `{"type": "service_account", ...}`)
+
+4. **Paste and save:**
+   - In the extension popup, paste the JSON into the textarea
+   - Click **Save Credentials**
+   - You should see: "Service account configured: [email]"
+   - The status should change to "Connected" with a green indicator
+
+5. **Test the connection:**
+   - Click **Test Connection**
+   - Should show "✓ Connection successful! Token obtained."
+
+### Step 5: Share Google Sheets with Service Account
+
+**⚠️ CRITICAL**: The service account needs access to all Google Sheets it will read/write.
+
+**For each Google Sheet** (master workbook, output workbooks):
+
+1. **Open the Google Sheet**
+2. **Click Share** (top-right button)
+3. **Add the Service Account Email:**
+   - In the "Add people and groups" field, paste the **Service Account Email** (from Step 3.6)
+   - It looks like: `savvy-pirate-extension@your-project.iam.gserviceaccount.com`
+4. **Set permission to Editor** (or at least **Viewer** for read-only sheets)
+5. **Click Send** (you can uncheck "Notify people" if desired)
+
+**Verify access:**
+- The service account email should appear in the "People with access" list
+- You can test by trying to load a workbook in the extension
+
+**Pro tip**: You can find the service account email in the extension popup after saving credentials - it's displayed under "Connected" status.
 
 ### Step 6: Test the Extension
 
-1. Click the extension icon in Chrome toolbar
-2. The side panel should open
-3. You should be prompted to authenticate with Google (first time only)
-4. After authentication, you can start configuring the extension
+1. Open the extension popup
+2. Go to **📘 Workbook Configuration (Live Sync)** section
+3. Enter your master workbook URL or ID
+4. Click **Load**
+5. The workbook should load **without any authentication prompts**
+6. Check the service worker console (`chrome://extensions` → Inspect views: service worker) for:
+   - `[AUTH] Token obtained successfully` or `[AUTH] Using cached token`
+   - No OAuth popups or sign-in prompts
 
-## Platform-Specific Installation (Chrome vs Chromium/Raspberry Pi)
+## Platform-Specific Notes
 
-The extension works differently on **Chrome (Windows/Mac)** vs **Chromium (Linux/Raspberry Pi)** due to differences in OAuth support.
+### Service Account Authentication (All Platforms)
 
-### Chrome (Windows/Mac) - Standard Installation
+**Service Account authentication works identically on Chrome (Windows/Mac) and Chromium (Linux/Raspberry Pi).** There are no platform-specific differences - it's the same setup process everywhere.
 
-- Uses OAuth via `chrome.identity.launchWebAuthFlow()` and caches tokens in extension storage
-- Works well with a **Web application** OAuth client ID + `chromiumapp.org` redirect URIs
+**Benefits:**
+- ✅ Same setup on Chrome and Chromium
+- ✅ No browser-specific OAuth issues
+- ✅ No extension ID dependencies
+- ✅ Works reliably on Raspberry Pi without hanging or sign-in prompts
 
-### Chromium (Linux/Raspberry Pi) - Requires OAuth Modification
+### Legacy OAuth (Not Recommended)
 
-Chromium on Raspberry Pi frequently fails with `chrome.identity.getAuthToken()` (“The user is not signed in.”), even after logging in. This project uses a **Chromium-safe** OAuth flow via `chrome.identity.launchWebAuthFlow()` and cached tokens.
+If you need to use the old OAuth method (not recommended), the extension may still support it, but **Service Account authentication is strongly recommended** for better reliability and no user interaction requirements.
 
-**Steps:**
+#### IMPORTANT: Extension ID stability (for legacy OAuth only)
 
-1. In Google Cloud Console → **APIs & Services** → **Credentials**, create a **NEW OAuth 2.0 Client ID**:
-   - Application type: **Web application** (not Chrome extension)
-   - Name: "Savvy Pirate Web"
-   - Authorized redirect URIs:
-     - `https://<EXTENSION_ID>.chromiumapp.org/`
-     - If you ever get a *new* extension ID, add another redirect URI (you can have multiple)
-   - Get the extension ID from `chrome://extensions` after loading the extension
-
-2. Update `manifest.json` with the new **Web application** client ID
-
-3. Reload the extension and authenticate via the OAuth popup that appears
-
-#### IMPORTANT: Extension ID stability (avoid changing OAuth redirect URIs)
-
-Your OAuth redirect URI uses the extension ID:
+If using legacy OAuth, your OAuth redirect URI uses the extension ID:
 
 - `https://<EXTENSION_ID>.chromiumapp.org/`
 
 To keep the **same extension ID** on the Pi:
 
-- Always load the extension from the **same folder path** (shown in `chrome://extensions` → Details → “Loaded from”)
-- When updating code, **copy files into that same folder** and click **Reload** (do not “Load unpacked” again)
+- Always load the extension from the **same folder path** (shown in `chrome://extensions` → Details → "Loaded from")
+- When updating code, **copy files into that same folder** and click **Reload** (do not "Load unpacked" again)
 
 ## Raspberry Pi VNC Setup for Headless Operation
 
@@ -644,7 +693,39 @@ Each workbook automatically creates weekly tabs named `MM_DD_YY` (Eastern Time):
 - Check Chrome console for errors
 - Ensure you created `manifest.json` from `manifest-template.json`
 
-### OAuth Errors
+### Service Account Authentication Issues
+
+#### "Service account not configured" error
+
+- **Solution**: Go to extension popup → **🔑 Google Service Account** section → Paste your JSON key and click **Save Credentials**
+- Verify the JSON is valid: It should start with `{"type": "service_account", ...}` and contain `client_email`, `private_key`, and `token_uri` fields
+
+#### "Token exchange failed" or "401 Unauthorized"
+
+- **Cause**: Service account doesn't have access to the Google Sheet
+- **Solution**: Share the Google Sheet with the service account email:
+  1. Open the Google Sheet
+  2. Click **Share** (top-right)
+  3. Add the service account email (looks like `savvy-pirate-extension@your-project.iam.gserviceaccount.com`)
+  4. Set permission to **Editor** (or **Viewer** for read-only)
+  5. Click **Send**
+
+#### "Cannot access workbook" when loading
+
+- **Cause**: Service account email not shared with the workbook
+- **Solution**: Share the workbook with the service account email (see above)
+- **Verify**: Check the service account email in the popup (should show "Connected" with the email address)
+
+#### Test Connection fails
+
+- Check service worker console for detailed error messages
+- Verify JSON key is complete and valid JSON
+- Ensure Google Sheets API and Drive API are enabled in Google Cloud Console
+- Verify service account has proper permissions in Google Cloud Console
+
+### Legacy OAuth Errors (Not Recommended - Use Service Account Instead)
+
+If you're still using OAuth (not recommended), these troubleshooting steps may help:
 
 - Verify Extension ID matches in Google Cloud Console
 - Check redirect URI format: `https://<extension-id>.chromiumapp.org/`
@@ -652,15 +733,16 @@ Each workbook automatically creates weekly tabs named `MM_DD_YY` (Eastern Time):
 - Ensure OAuth Client ID in `manifest.json` matches Google Cloud Console
 - Verify OAuth consent screen is configured correctly
 
-#### OAuth keeps prompting / “The user is not signed in” (Raspberry Pi Chromium)
+#### OAuth keeps prompting / "The user is not signed in" (Raspberry Pi Chromium)
 
-If you keep getting re-prompted to log in (or you see an auth error like **“The user is not signed in.”**) on the Pi:
+**Recommendation**: Switch to Service Account authentication (see Step 3 in Installation). It's more reliable and doesn't require browser OAuth.
 
+If you must use OAuth:
 1. On the Pi, open `chrome://extensions` → Savvy Pirate → copy the **ID**
 2. In Google Cloud Console → **APIs & Services → Credentials**, confirm you are using a **Web application** OAuth client
 3. In that same OAuth client, confirm **Authorized redirect URIs** includes:
    - `https://<EXTENSION_ID>.chromiumapp.org/` (replace with the ID from step 1)
-4. Confirm the Pi’s deployed `manifest.json` uses that **Web application client ID** (not a Chrome extension client)
+4. Confirm the Pi's deployed `manifest.json` uses that **Web application client ID** (not a Chrome extension client)
 5. Reload the extension (`chrome://extensions` → Reload) and try again
 
 ### Service Worker Inactive
@@ -897,7 +979,24 @@ For search delays, modify in `background/service_worker.js`:
 ## Security Notes
 
 ⚠️ **IMPORTANT**:
-- `manifest.json` contains your OAuth Client ID - keep it secure
+
+### Service Account JSON Key Security
+
+- **Service Account JSON Key contains a private key** - **NEVER commit this to git or share publicly**
+- The JSON key is stored in `chrome.storage.local` (encrypted by Chrome)
+- Only paste it into the extension popup on trusted devices
+- If compromised, delete the service account in Google Cloud Console and create a new one
+- The private key in the JSON file allows full access to Google Sheets - treat it as highly sensitive
+
+### Service Account Email
+
+- The service account email (e.g., `savvy-pirate-extension@your-project.iam.gserviceaccount.com`) is **public and safe to share**
+- Share this email with Google Sheets to grant access
+- The email itself doesn't grant access - the private key does
+
+### Legacy OAuth (if still using)
+
+- `manifest.json` may contain your OAuth Client ID - keep it secure
 - **Do NOT commit `manifest.json` to public repositories**
 - `.gitignore` is configured to exclude sensitive files
 - Use `manifest-template.json` as a template for others

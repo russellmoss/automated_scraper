@@ -707,6 +707,65 @@ label {
     display: none !important;
 }
 
+/* ============================================================
+   SERVICE ACCOUNT CONFIGURATION
+   ============================================================ */
+.json-textarea {
+    width: 100%;
+    padding: 10px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    color: var(--text-primary);
+    font-family: 'Courier New', monospace;
+    font-size: 11px;
+    resize: vertical;
+    min-height: 100px;
+}
+
+.json-textarea:focus {
+    outline: none;
+    border-color: var(--accent-red);
+}
+
+.json-textarea::placeholder {
+    color: var(--text-muted);
+}
+
+#service-account-status .status-indicator {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+#service-account-status .status-indicator::before {
+    content: '';
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-muted);
+}
+
+#service-account-status.configured .status-indicator::before {
+    background: var(--accent-green);
+}
+
+#service-account-status.not-configured .status-indicator::before {
+    background: var(--accent-gold);
+}
+
+#service-account-status.error .status-indicator::before {
+    background: var(--accent-red);
+}
+
+.service-account-email {
+    font-family: 'Courier New', monospace;
+    font-size: 11px;
+    color: var(--text-secondary);
+    word-break: break-all;
+    margin-top: 4px;
+}
+
 .text-muted {
     color: var(--text-muted);
 }

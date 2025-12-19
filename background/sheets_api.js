@@ -27,10 +27,18 @@ async function fetchWithRetry(url, options, retryCount = 0) {
             try {
                 newToken = await getAuthToken(false);
             } catch (e) {
-                await notifyGoogleAuthExpired(
-                    `Token refresh failed after 401 (non-interactive): ${e?.message || String(e)}`,
-                    null
-                ).catch(() => {});
+                // For service accounts, token refresh failure means:
+                // 1. Service account not configured (missing credentials)
+                // 2. Invalid credentials (wrong JSON key)
+                // 3. Service account deleted/disabled in Google Cloud
+                // Only notify if it's a configuration issue (not a transient network error)
+                const errorMsg = e?.message || String(e);
+                if (errorMsg.includes('not configured') || errorMsg.includes('missing required field') || errorMsg.includes('Service account')) {
+                    await notifyGoogleAuthExpired(
+                        `Service account configuration error: ${errorMsg}. Check service account setup in extension popup.`,
+                        null
+                    ).catch(() => {});
+                }
                 throw e;
             }
             options.headers.Authorization = `Bearer ${newToken}`;
@@ -47,16 +55,27 @@ async function fetchWithRetry(url, options, retryCount = 0) {
 
 /**
  * Make authenticated API call
+ * For service accounts, the interactive parameter is ignored (no user interaction needed)
  */
 async function apiCall(endpoint, options = {}) {
     let token;
+    
+    // Service accounts don't require interactive auth - just get the token
     try {
-        token = await getAuthToken(true);
+        console.log(`${LOG} 🔑 Retrieving service account token...`);
+        token = await getAuthToken(false); // interactive parameter ignored for service accounts
+        console.log(`${LOG} ✅ Token retrieved successfully`);
     } catch (e) {
-        await notifyGoogleAuthExpired(
-            `getAuthToken failed (interactive may be required): ${e?.message || String(e)}`,
-            null
-        ).catch(() => {});
+        console.error(`${LOG} ❌ Token retrieval failed: ${e?.message || String(e)}`);
+        // For service accounts, token retrieval failure means configuration issue
+        // Only notify for configuration errors (not transient network errors)
+        const errorMsg = e?.message || String(e);
+        if (errorMsg.includes('not configured') || errorMsg.includes('missing required field') || errorMsg.includes('Service account')) {
+            await notifyGoogleAuthExpired(
+                `Service account not configured or invalid: ${errorMsg}. Configure service account in extension popup.`,
+                null
+            ).catch(() => {});
+        }
         throw e;
     }
     const url = endpoint.startsWith('http') ? endpoint : `${SHEETS_API_BASE}${endpoint}`;
@@ -75,6 +94,10 @@ async function apiCall(endpoint, options = {}) {
     const response = await fetchWithRetry(url, fetchOptions);
 
     // If we are still getting 401 here, it means refresh retry didn't fix it.
+    // With service accounts, 401 usually means:
+    // 1. Service account doesn't have access to the sheet (permissions issue)
+    // 2. Service account was deleted/disabled in Google Cloud
+    // 3. Invalid credentials (though this would fail earlier)
     if (response.status === 401) {
         let body = '';
         try {
@@ -82,11 +105,16 @@ async function apiCall(endpoint, options = {}) {
         } catch (e) {
             // ignore
         }
-        await notifyGoogleAuthExpired(
-            `Sheets API 401 after refresh retry. Endpoint: ${endpoint}. Body: ${String(body).substring(0, 200)}`,
-            null
-        ).catch(() => {});
-        throw new Error('Google OAuth requires re-authentication (401 after refresh retry)');
+        // Only notify for persistent 401s (likely permission issue, not transient)
+        // Check if error mentions permissions/access
+        const bodyStr = String(body).toLowerCase();
+        if (bodyStr.includes('permission') || bodyStr.includes('access') || bodyStr.includes('forbidden') || bodyStr.includes('insufficient')) {
+            await notifyGoogleAuthExpired(
+                `Service account lacks access to Google Sheet. Share the sheet with the service account email. Endpoint: ${endpoint}`,
+                null
+            ).catch(() => {});
+        }
+        throw new Error(`Google Sheets API 401: Service account may lack access to this sheet. Share the sheet with the service account email.`);
     }
     
     if (!response.ok) {

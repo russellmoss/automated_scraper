@@ -48,7 +48,10 @@ export const ALARM_NAMES = {
     AUTO_RUN_KEEPALIVE: 'auto-run-keepalive',
 
     // Live workbook sync
-    WORKBOOK_SYNC: 'workbook-sync-alarm'
+    WORKBOOK_SYNC: 'workbook-sync-alarm',
+    
+    // Token refresh (proactive OAuth token refresh)
+    TOKEN_REFRESH: 'token-refresh-alarm'
 };
 
 export const STORAGE_KEYS = {
@@ -160,7 +163,12 @@ export const MESSAGE_ACTIONS = {
     GET_WORKBOOK_CONFIG: 'GET_WORKBOOK_CONFIG',
     SET_SYNC_INTERVAL: 'SET_SYNC_INTERVAL',
     GET_SYNC_STATUS: 'GET_SYNC_STATUS',
-    CLEAR_WORKBOOK: 'CLEAR_WORKBOOK'
+    CLEAR_WORKBOOK: 'CLEAR_WORKBOOK',
+    
+    // Service Account
+    GET_SERVICE_ACCOUNT_STATUS: 'GET_SERVICE_ACCOUNT_STATUS',
+    SETUP_SERVICE_ACCOUNT: 'SETUP_SERVICE_ACCOUNT',
+    CLEAR_SERVICE_ACCOUNT: 'CLEAR_SERVICE_ACCOUNT'
 };
 
 export const SCHEDULE_DAYS = [
