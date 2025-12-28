@@ -64,6 +64,7 @@ export const STORAGE_KEYS = {
     SCHEDULES: 'schedules',
     EXECUTION_HISTORY: 'executionHistory',
     PENDING_SCHEDULES: 'pendingSchedules',  // Queue for schedules deferred due to overlap
+    SCHEDULE_LOCAL_OVERRIDES: 'scheduleLocalOverrides',  // Local per-instance enabled/disabled overrides (not synced)
     
     // State
     SYNC_QUEUE: 'syncQueue',

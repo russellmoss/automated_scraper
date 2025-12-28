@@ -1,0 +1,13 @@
+{
+  "name": "savvy-pirate-sync",
+  "version": "1.0.0",
+  "description": "Cloud Function to sync Savvy Pirate scraping data to BigQuery",
+  "main": "index.js",
+  "dependencies": {
+    "@google-cloud/bigquery": "^7.3.0",
+    "uuid": "^9.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

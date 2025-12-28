@@ -351,7 +351,10 @@ async function reconcileSchedulesFromConfig(config) {
             minute: time.minute,
             frequency,
             weekPattern,
-            enabled: true,
+            // Don't set enabled here - let setSchedule preserve local overrides
+            // The base enabled state will be set to true for new schedules, but
+            // existing schedules with local overrides will preserve them
+            enabled: true, // Only used for new schedules
             managedBy: MANAGED_BY
         });
     }

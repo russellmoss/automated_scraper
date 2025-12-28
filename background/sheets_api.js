@@ -11,12 +11,18 @@ const LOG = LOG_PREFIXES.SHEETS;
 // ============================================================
 
 /**
- * Fetch with automatic token refresh on 401
+ * Fetch with automatic retry for transient errors (401, 503, 429, 500, 502)
+ * - 401: Token refresh (1 retry)
+ * - 503, 429, 500, 502: Exponential backoff (up to 3 retries)
  */
 async function fetchWithRetry(url, options, retryCount = 0) {
+    const MAX_RETRIES = 3;
+    const TRANSIENT_ERRORS = [503, 429, 500, 502]; // Service unavailable, rate limit, server errors
+    
     try {
         const response = await fetch(url, options);
         
+        // Handle 401 (authentication) - refresh token once
         if (response.status === 401 && retryCount < 1) {
             console.log(`${LOG} 401 detected, refreshing token...`);
 
@@ -46,8 +52,26 @@ async function fetchWithRetry(url, options, retryCount = 0) {
             return fetchWithRetry(url, options, retryCount + 1);
         }
         
+        // Handle transient errors (503, 429, 500, 502) - retry with exponential backoff
+        if (TRANSIENT_ERRORS.includes(response.status) && retryCount < MAX_RETRIES) {
+            const backoffMs = Math.min(1000 * Math.pow(2, retryCount), 10000); // Max 10 seconds
+            console.warn(`${LOG} Transient error ${response.status} detected, retrying in ${backoffMs}ms (attempt ${retryCount + 1}/${MAX_RETRIES})...`);
+            
+            await new Promise(resolve => setTimeout(resolve, backoffMs));
+            return fetchWithRetry(url, options, retryCount + 1);
+        }
+        
         return response;
     } catch (e) {
+        // Network errors (not HTTP response errors) - also retry with backoff
+        if (retryCount < MAX_RETRIES && (e.name === 'TypeError' || e.message?.includes('fetch'))) {
+            const backoffMs = Math.min(1000 * Math.pow(2, retryCount), 10000);
+            console.warn(`${LOG} Network error detected, retrying in ${backoffMs}ms (attempt ${retryCount + 1}/${MAX_RETRIES})...`);
+            
+            await new Promise(resolve => setTimeout(resolve, backoffMs));
+            return fetchWithRetry(url, options, retryCount + 1);
+        }
+        
         console.error(`${LOG} Fetch error:`, e);
         throw e;
     }
@@ -356,6 +380,22 @@ export async function getTabData(spreadsheetId, tabName) {
         rows: values.slice(1),
         rowCount: values.length - 1
     };
+}
+
+/**
+ * Count rows in a tab (excluding header row)
+ * @param {string} spreadsheetId - Spreadsheet ID
+ * @param {string} tabName - Tab name
+ * @returns {Promise<number>} Number of data rows (excluding header)
+ */
+export async function countRowsInTab(spreadsheetId, tabName) {
+    try {
+        const tabData = await getTabData(spreadsheetId, tabName);
+        return tabData.rowCount;
+    } catch (error) {
+        console.error(`${LOG} Error counting rows in tab "${tabName}":`, error);
+        return 0;
+    }
 }
 
 // ============================================================

@@ -24,7 +24,12 @@
     // SELECTORS (Updated based on diagnostic - January 2025)
     // ============================================================
     const SELECTORS = {
+        // Primary selector for profile name links
         NAME_LINK: 'a[data-view-name="search-result-lockup-title"]',
+        // Fallback selectors for different LinkedIn page layouts
+        NAME_LINK_FALLBACK_1: 'a[href*="/in/"][href*="linkedin.com"]',
+        NAME_LINK_FALLBACK_2: 'li.reusable-search__result-container a[href*="/in/"]',
+        NAME_LINK_FALLBACK_3: 'div[class*="entity-result"] a[href*="/in/"]',
         // OLD selectors still work (acd09c55 for title, bb0216de for location)
         TITLE_PRIMARY: 'div.acd09c55 > p',  // Working
         TITLE_FALLBACK_1: 'div[data-view-name="people-search-result"] div.d395caa1:not(.a7293f27) > p',
@@ -253,7 +258,49 @@
     function findProfileCards() {
         const cards = [];
         const seenUrls = new Set(); // Track seen profile URLs to avoid duplicates
-        const nameLinks = document.querySelectorAll(SELECTORS.NAME_LINK);
+        // Try primary selector first
+        let nameLinks = Array.from(document.querySelectorAll(SELECTORS.NAME_LINK));
+        
+        // If no results, try fallback selectors
+        if (nameLinks.length === 0) {
+            console.log('[CS] Primary selector found 0 links, trying fallbacks...');
+            nameLinks = Array.from(document.querySelectorAll(SELECTORS.NAME_LINK_FALLBACK_1));
+            
+            if (nameLinks.length === 0) {
+                nameLinks = Array.from(document.querySelectorAll(SELECTORS.NAME_LINK_FALLBACK_2));
+            }
+            if (nameLinks.length === 0) {
+                nameLinks = Array.from(document.querySelectorAll(SELECTORS.NAME_LINK_FALLBACK_3));
+            }
+            
+            // Filter to only profile links (must contain /in/)
+            nameLinks = nameLinks.filter(link => {
+                const url = link.href?.split('?')[0] || '';
+                return url.includes('/in/') && !url.includes('/search/');
+            });
+            
+            console.log(`[CS] Fallback selectors found ${nameLinks.length} profile links`);
+        }
+        
+        // Additional fallback: find all links with /in/ in search results
+        if (nameLinks.length === 0) {
+            console.log('[CS] Trying broad search for profile links...');
+            const allLinks = Array.from(document.querySelectorAll('a[href*="/in/"]'));
+            nameLinks = allLinks.filter(link => {
+                const url = link.href?.split('?')[0] || '';
+                // Must be a profile link, not a search result page link
+                const isProfileLink = url.includes('/in/') && 
+                                    !url.includes('/search/') && 
+                                    !url.includes('/feed/') &&
+                                    !url.includes('/messaging/');
+                // Must be in a search result container
+                const inSearchResult = link.closest('li.reusable-search__result-container') ||
+                                      link.closest('div[class*="entity-result"]') ||
+                                      link.closest('li[class*="result"]');
+                return isProfileLink && inSearchResult;
+            });
+            console.log(`[CS] Broad search found ${nameLinks.length} profile links in search results`);
+        }
         
         nameLinks.forEach(nameLink => {
             // Get URL first to check for duplicates
@@ -280,8 +327,8 @@
             }
             
             if (card) {
-                const nameText = nameLink.innerText?.trim() || '';
-                if (nameText) { // Only add if we have a name
+                const nameText = nameLink.innerText?.trim() || nameLink.textContent?.trim() || '';
+                if (nameText && nameText.length > 0) { // Only add if we have a name
                     cards.push({
                         card,
                         nameLink,
@@ -290,6 +337,10 @@
                 }
             }
         });
+        
+        if (cards.length === 0 && nameLinks.length > 0) {
+            console.warn(`[CS] Found ${nameLinks.length} profile links but 0 valid cards - may need to wait for page to load`);
+        }
         
         return cards;
     }
@@ -580,15 +631,44 @@
     // ============================================================
     async function waitForEntriesToLoad(expected, timeout = 20000) {
         const startTime = Date.now();
+        let lastCount = 0;
+        let noChangeCount = 0;
+        
         while (Date.now() - startTime < timeout) {
             if (stopRequested) return false;
+            
             const cards = findProfileCards();
-            if (cards.length >= expected) {
+            const currentCount = cards.length;
+            
+            // If we found enough cards, return true
+            if (currentCount >= expected) {
+                console.log(`[CS] Found ${currentCount} profile cards (needed ${expected})`);
                 return true;
             }
+            
+            // Track if count is changing (page is still loading)
+            if (currentCount === lastCount) {
+                noChangeCount++;
+            } else {
+                noChangeCount = 0;
+                console.log(`[CS] Found ${currentCount} profile cards so far (waiting for more...)`);
+            }
+            
+            // If count hasn't changed for several checks, page might be done loading
+            // But still wait a bit more in case it's a slow-loading page
+            if (noChangeCount >= 4 && currentCount > 0) {
+                console.log(`[CS] Card count stable at ${currentCount} - page likely done loading`);
+                return currentCount >= expected;
+            }
+            
+            lastCount = currentCount;
             await wait(500);
         }
-        return false;
+        
+        // Final check
+        const finalCards = findProfileCards();
+        console.log(`[CS] Timeout reached - found ${finalCards.length} profile cards`);
+        return finalCards.length >= expected;
     }
 
     async function scrapeCurrentPage(sourceName) {
@@ -596,8 +676,39 @@
         window.scrollTo(0, document.body.scrollHeight);
         await wait(CONFIG.SCROLL_WAIT_MS);
         
+        // Additional scrolls to ensure all content loads
+        for (let i = 0; i < 3; i++) {
+            window.scrollTo(0, document.body.scrollHeight);
+            await wait(1000);
+        }
+        
         const cards = findProfileCards();
         console.log(`[CS] Found ${cards.length} profile cards on page`);
+        
+        // If no cards found, log diagnostic info
+        if (cards.length === 0) {
+            console.warn('[CS] WARNING: No profile cards found - checking page state...');
+            console.warn(`[CS] Current URL: ${window.location.href}`);
+            console.warn(`[CS] Page title: ${document.title}`);
+            
+            // Check if we're on a search results page
+            const isSearchPage = window.location.href.includes('/search/results/people');
+            console.warn(`[CS] Is search results page: ${isSearchPage}`);
+            
+            // Check for common LinkedIn elements
+            const hasSearchContainer = document.querySelector('ul.reusable-search__entity-result-list') ||
+                                      document.querySelector('div[class*="search-results"]') ||
+                                      document.querySelector('ul[class*="results"]');
+            console.warn(`[CS] Has search container: ${!!hasSearchContainer}`);
+            
+            // Check for any profile links at all
+            const anyProfileLinks = document.querySelectorAll('a[href*="/in/"]');
+            console.warn(`[CS] Total links with /in/: ${anyProfileLinks.length}`);
+            
+            // Check for loading indicators
+            const loadingIndicators = document.querySelectorAll('[class*="loading"], [class*="skeleton"], [aria-busy="true"]');
+            console.warn(`[CS] Loading indicators found: ${loadingIndicators.length}`);
+        }
         
         const rows = [];
         const seenUrls = new Set(); // Track seen URLs to avoid duplicates
@@ -718,9 +829,20 @@
             box-shadow: 0 4px 12px rgba(0,0,0,0.3);
         `;
         
-        stopButton.addEventListener('click', () => {
+        stopButton.addEventListener('click', async () => {
             stopRequested = true;
             updateButtonStatus('Stopping...', '#ffc107');
+            
+            // Notify service worker to stop auto-run (for scheduled scrapes)
+            // This ensures the scheduled scrape is properly aborted
+            try {
+                await chrome.runtime.sendMessage({ action: 'STOP_AUTO_RUN' });
+            } catch (e) {
+                console.warn('[CS] Failed to send STOP_AUTO_RUN message:', e);
+            }
+            
+            // Also send STOP_SCRAPING to ensure content script stops
+            // (This is handled by the message listener, but sending it explicitly ensures it's processed)
         });
         
         document.body.appendChild(stopButton);
@@ -803,40 +925,42 @@
                     }
                 }
                 
-                if (stopRequested) {
-                    console.log('[CS] STOP: Stop requested by user');
-                    break;
-                }
-                
-                // Try to go to next page
-                const hasNext = await clickNextButton();
-                
-                if (!hasNext) {
-                    console.log('[CS] OK: No more pages available');
-                    break;
-                }
-                
-                // Random delay between pages
-                const delay = randomDelay();
-                console.log(`[CS] Waiting ${(delay/1000).toFixed(1)}s before next page...`);
-                await wait(delay);
-                
-                // Occasional long pause to simulate user distraction
-                if (shouldTakeLongPause()) {
-                    const longDelay = longPauseDelay();
-                    console.log(`[CS] Taking a break... ${(longDelay/1000).toFixed(0)}s (simulating user distraction)`);
-                    await wait(longDelay);
-                }
+            if (stopRequested) {
+                console.log('[CS] STOP: Stop requested by user');
+                break;
             }
             
-            console.log(`[CS] OK: Scraping complete: ${totalProfiles} profiles from ${totalPages} pages`);
+            // Try to go to next page
+            const hasNext = await clickNextButton();
             
-            // Send completion message
-            sendMessageSafe({
-                action: 'SCRAPING_COMPLETE',
-                totalProfiles: totalProfiles,
-                totalPages: totalPages
-            });
+            if (!hasNext) {
+                console.log('[CS] OK: No more pages available');
+                break;
+            }
+            
+            // Random delay between pages
+            const delay = randomDelay();
+            console.log(`[CS] Waiting ${(delay/1000).toFixed(1)}s before next page...`);
+            await wait(delay);
+            
+            // Occasional long pause to simulate user distraction
+            if (shouldTakeLongPause()) {
+                const longDelay = longPauseDelay();
+                console.log(`[CS] Taking a break... ${(longDelay/1000).toFixed(0)}s (simulating user distraction)`);
+                await wait(longDelay);
+            }
+        }
+        
+        const wasAborted = stopRequested;
+        console.log(`[CS] OK: Scraping ${wasAborted ? 'stopped' : 'complete'}: ${totalProfiles} profiles from ${totalPages} pages`);
+        
+        // Send completion message
+        sendMessageSafe({
+            action: 'SCRAPING_COMPLETE',
+            totalProfiles: totalProfiles,
+            totalPages: totalPages,
+            aborted: wasAborted
+        });
             
         } catch (error) {
             console.error('[CS] ❌ Scraping error:', error);

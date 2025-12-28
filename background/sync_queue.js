@@ -1,6 +1,6 @@
 // background/sync_queue.js - Local-First Data Queue with Retry Logic
 
-import { appendRowsToTab } from './sheets_api.js';
+import { appendRowsToTab, countRowsInTab } from './sheets_api.js';
 import { STORAGE_KEYS, CONFIG, LOG_PREFIXES } from '../utils/constants.js';
 
 const LOG = LOG_PREFIXES.QUEUE;
@@ -138,6 +138,33 @@ export async function processQueue() {
             
             synced++;
             console.log(`${LOG} ✅ Synced ${item.rows.length} rows (ID: ${item.id})`);
+            
+            // Update execution history with actual row count from sheet
+            // This gives us the real count of what's in the sheet (excluding header)
+            try {
+                const rowCount = await countRowsInTab(item.spreadsheetId, item.tabName);
+                
+                // Find the active execution record for this workbook/tab
+                const { autoRunState, manualScrapeState } = await getFromStorage(['autoRunState', 'manualScrapeState']);
+                const executionId = autoRunState?.executionId || manualScrapeState?.executionId;
+                
+                if (executionId) {
+                    // Check if this execution matches the workbook/tab we just wrote to
+                    const { executionHistory } = await getFromStorage(['executionHistory']);
+                    const execution = executionHistory?.find(e => e.id === executionId);
+                    
+                    if (execution && execution.workbookId === item.spreadsheetId && execution.tabName === item.tabName) {
+                        // Update with actual row count from sheet
+                        const { updateExecutionRecord } = await import('./scheduler.js');
+                        await updateExecutionRecord(executionId, {
+                            profilesScraped: rowCount
+                        }).catch(err => console.warn(`${LOG} Failed to update execution record:`, err));
+                    }
+                }
+            } catch (updateError) {
+                // Don't fail the sync if execution update fails
+                console.warn(`${LOG} Failed to update execution record with row count:`, updateError);
+            }
             
         } catch (error) {
             console.error(`${LOG} ❌ Sync failed for ${item.id}:`, error.message);

@@ -181,6 +181,48 @@ function generateId() {
  * Get all schedules
  * @returns {Promise<Array>} Array of schedule objects
  */
+/**
+ * Get local enabled override for a schedule (per-instance, not synced)
+ * @param {string} scheduleId - Schedule ID
+ * @returns {Promise<boolean|null>} Override value (true/false) or null if no override
+ */
+async function getScheduleLocalOverride(scheduleId) {
+    const { scheduleLocalOverrides } = await getFromStorage([STORAGE_KEYS.SCHEDULE_LOCAL_OVERRIDES]);
+    const overrides = scheduleLocalOverrides || {};
+    return overrides[scheduleId] !== undefined ? overrides[scheduleId] : null;
+}
+
+/**
+ * Set local enabled override for a schedule (per-instance, not synced)
+ * @param {string} scheduleId - Schedule ID
+ * @param {boolean|null} enabled - Override value (true/false) or null to clear override
+ * @returns {Promise<void>}
+ */
+export async function setScheduleLocalOverride(scheduleId, enabled) {
+    const { scheduleLocalOverrides } = await getFromStorage([STORAGE_KEYS.SCHEDULE_LOCAL_OVERRIDES]);
+    const overrides = scheduleLocalOverrides || {};
+    
+    if (enabled === null) {
+        // Clear override
+        delete overrides[scheduleId];
+    } else {
+        // Set override
+        overrides[scheduleId] = enabled;
+    }
+    
+    await saveToStorage({ [STORAGE_KEYS.SCHEDULE_LOCAL_OVERRIDES]: overrides });
+}
+
+/**
+ * Get effective enabled state for a schedule (checks local override first)
+ * @param {Object} schedule - Schedule object
+ * @returns {Promise<boolean>} Effective enabled state
+ */
+export async function getEffectiveEnabled(schedule) {
+    const localOverride = await getScheduleLocalOverride(schedule.id);
+    return localOverride !== null ? localOverride : schedule.enabled;
+}
+
 export async function getSchedules() {
     const { schedules } = await getFromStorage([STORAGE_KEYS.SCHEDULES]);
     return schedules || [];
@@ -198,13 +240,44 @@ export async function setSchedule(scheduleData) {
     let schedule;
     const existingIndex = schedules.findIndex(s => s.id === scheduleData.id);
     
+    // Check if this is a sync operation (managedBy is set and enabled is being forced)
+    const isSyncOperation = scheduleData.managedBy === 'workbookSync' && 
+                            scheduleData.enabled !== undefined &&
+                            existingIndex >= 0;
+    
     if (existingIndex >= 0) {
-        // Update existing
+        // Update existing - preserve local override if it exists during sync
+        const existingSchedule = schedules[existingIndex];
+        const localOverride = await getScheduleLocalOverride(scheduleData.id);
+        
+        // Check if this is a user toggle on a workbook-managed schedule
+        // In that case, we should preserve the stored enabled value (workbook state)
+        // and let the override handle the user's preference
+        const isUserToggleOnManagedSchedule = !isSyncOperation && 
+                                             existingSchedule.managedBy === 'workbookSync' &&
+                                             scheduleData.enabled !== undefined &&
+                                             scheduleData.enabled !== existingSchedule.enabled;
+        
+        // If syncing and there's a local override, don't overwrite the enabled state
+        // If user is toggling a managed schedule, preserve the stored enabled value
+        let effectiveEnabled = scheduleData.enabled !== undefined ? scheduleData.enabled : existingSchedule.enabled;
+        if (isSyncOperation && localOverride !== null) {
+            // Preserve local override - don't update enabled from sync
+            effectiveEnabled = existingSchedule.enabled; // Keep existing, override will be applied in getEffectiveEnabled
+            console.log(`${LOG} Preserving local override for ${existingSchedule.sourceName} (sync operation)`);
+        } else if (isUserToggleOnManagedSchedule) {
+            // User is toggling a workbook-managed schedule - preserve stored enabled value
+            // The override will be set separately in the message handler
+            effectiveEnabled = existingSchedule.enabled; // Keep workbook state, override handles user preference
+            console.log(`${LOG} Preserving workbook state for ${existingSchedule.sourceName} (user toggle)`);
+        }
+        
         schedule = {
-            ...schedules[existingIndex],
+            ...existingSchedule,
             ...scheduleData,
+            enabled: effectiveEnabled, // Store the base enabled state
             updatedAt: now,
-            nextRun: calculateNextRun({ ...schedules[existingIndex], ...scheduleData })
+            nextRun: calculateNextRun({ ...existingSchedule, ...scheduleData, enabled: effectiveEnabled })
         };
         schedules[existingIndex] = schedule;
         console.log(`${LOG} Updated schedule for ${schedule.sourceName}`);
@@ -345,7 +418,9 @@ export async function checkSchedules(includePending = true, runningSourceName = 
     
     // Check regular schedules
     for (const schedule of schedules) {
-        if (!schedule.enabled) continue;
+        // Check effective enabled state (includes local overrides)
+        const effectiveEnabled = await getEffectiveEnabled(schedule);
+        if (!effectiveEnabled) continue;
         
         // Skip if this schedule is currently running
         if (runningSourceName && schedule.sourceName === runningSourceName) {
@@ -643,7 +718,15 @@ export async function getScheduledSources() {
  */
 export async function getNextScheduledRun() {
     const schedules = await getSchedules();
-    const enabled = schedules.filter(s => s.enabled);
+    
+    // Filter by effective enabled state (includes local overrides)
+    const enabled = [];
+    for (const schedule of schedules) {
+        const effectiveEnabled = await getEffectiveEnabled(schedule);
+        if (effectiveEnabled) {
+            enabled.push(schedule);
+        }
+    }
     
     if (enabled.length === 0) return null;
     

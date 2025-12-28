@@ -1322,7 +1322,9 @@ async function toggleScheduleEnabled(scheduleId, enabled) {
             await sendMessage('SET_SCHEDULE', {
                 schedule: { ...schedule, enabled }
             });
-            schedule.enabled = enabled;
+            // Reload schedules to get the updated state (including any override changes)
+            const scheduleResult = await sendMessage('GET_SCHEDULES');
+            state.schedules = scheduleResult.schedules || [];
             renderScheduleList();
         }
     } catch (error) {

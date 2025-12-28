@@ -29,7 +29,7 @@ import {
     getExecutionHistory, getScheduleForSource, calculateNextRun,
     generateSheetUrlWithGid, addPendingSchedule, removePendingSchedule,
     getPendingSchedules,
-    validateSchedule
+    validateSchedule, setScheduleLocalOverride, getEffectiveEnabled
 } from './scheduler.js';
 import {
     setWebhookUrl, getWebhookUrl, testWebhook,
@@ -226,14 +226,28 @@ async function resumeAutoRunAfterReload() {
         chrome.alarms.clear(ALARM_NAMES.AUTO_RUN_KEEPALIVE);
 
         // Complete execution record + notification (only if we have an executionId)
+        // Use actual row count from sheet instead of scraped count
         if (executionId) {
+            let rowCount = totalProfiles; // Fallback to scraped count
+            try {
+                const { executionHistory } = await getFromStorage(['executionHistory']);
+                const execution = executionHistory?.find(e => e.id === executionId);
+                if (execution?.workbookId && execution?.tabName) {
+                    const { countRowsInTab } = await import('./sheets_api.js');
+                    rowCount = await countRowsInTab(execution.workbookId, execution.tabName);
+                }
+            } catch (error) {
+                // Fallback to scraped count if counting fails
+                console.warn(`${LOG} Failed to count rows, using scraped count:`, error);
+            }
+            
             await updateExecutionRecord(executionId, {
                 status: 'completed',
                 searchesCompleted: completedSearches,
-                profilesScraped: totalProfiles,
+                profilesScraped: rowCount,
                 completedAt: new Date().toISOString()
             });
-            await notifyScheduleCompleted(sourceName, totalProfiles, totalSearches).catch(() => {});
+            await notifyScheduleCompleted(sourceName, rowCount, totalSearches).catch(() => {});
         }
     } catch (error) {
         console.error(`${LOG} Auto-run resume error:`, error);
@@ -579,9 +593,17 @@ async function executeScheduledRun(schedule) {
         // Process searches
         await processAutoRunQueue();
         
-        // Get final stats
-        const finalState = await getFromStorage(['autoRunState']);
-        const profilesScraped = finalState.autoRunState?.progress?.totalProfiles || 0;
+        // Get final stats - use actual row count from sheet instead of scraped count
+        let profilesScraped = 0;
+        try {
+            const { tabName } = await ensureWeeklyTab(workbookId);
+            const { countRowsInTab } = await import('./sheets_api.js');
+            profilesScraped = await countRowsInTab(workbookId, tabName);
+        } catch (error) {
+            console.warn(`${LOG} Failed to count rows in sheet, using scraped count:`, error);
+            const finalState = await getFromStorage(['autoRunState']);
+            profilesScraped = finalState.autoRunState?.progress?.totalProfiles || 0;
+        }
         
         // Update execution record
         await updateExecutionRecord(execution.id, {
@@ -843,6 +865,13 @@ async function processAutoRunQueue() {
                 throw new Error(`LinkedIn auth failure (${authCheck.status}): ${authCheck.message}`);
             }
             
+            // Check for abort before starting scrape
+            const preScrapeState = await getFromStorage(['autoRunState']);
+            if (preScrapeState.autoRunState?.isAborted) {
+                console.log(`${LOG} Auto-run aborted before starting scrape`);
+                return;
+            }
+            
             // Send scraping command
             try {
                 await chrome.tabs.sendMessage(tab.id, {
@@ -855,6 +884,13 @@ async function processAutoRunQueue() {
                 // Reduced timeout to 30 minutes (was 30 min, keeping same but adding better logging)
                 const result = await waitForScrapingComplete(tab.id, 1800000);
                 
+                // Check for abort again after scraping completes
+                const postScrapeState = await getFromStorage(['autoRunState']);
+                if (postScrapeState.autoRunState?.isAborted) {
+                    console.log(`${LOG} Auto-run aborted after scraping`);
+                    return;
+                }
+                
                 if (result?.timeout) {
                     console.error(`${LOG} ⚠️ Scraping timed out after 30 minutes - content script may be stuck`);
                     console.error(`${LOG} This usually means the scraper is stuck on the last page. Check content script logs.`);
@@ -866,6 +902,12 @@ async function processAutoRunQueue() {
                 
             } catch (e) {
                 console.error(`${LOG} Scraping error:`, e);
+                // Check for abort on error too
+                const errorState = await getFromStorage(['autoRunState']);
+                if (errorState.autoRunState?.isAborted) {
+                    console.log(`${LOG} Auto-run aborted after error`);
+                    return;
+                }
                 // Continue to next search even on error to prevent getting stuck
             }
             
@@ -873,10 +915,25 @@ async function processAutoRunQueue() {
             progress.completedSearches++;
             
             // Update execution record with current progress
-            const updatedState = await getFromStorage(['autoRunState']);
+            // Use actual row count from sheet instead of scraped count
+            const updatedState = await getFromStorage(['autoRunState', 'executionHistory']);
             if (updatedState.autoRunState?.executionId) {
+                let rowCount = progress.totalProfiles; // Fallback to scraped count
+                try {
+                    const execution = updatedState.executionHistory?.find(
+                        e => e.id === updatedState.autoRunState.executionId
+                    );
+                    if (execution?.workbookId && execution?.tabName) {
+                        const { countRowsInTab } = await import('./sheets_api.js');
+                        rowCount = await countRowsInTab(execution.workbookId, execution.tabName);
+                    }
+                } catch (error) {
+                    // Fallback to scraped count if counting fails
+                    console.warn(`${LOG} Failed to count rows, using scraped count:`, error);
+                }
+                
                 await updateExecutionRecord(updatedState.autoRunState.executionId, {
-                    profilesScraped: progress.totalProfiles,
+                    profilesScraped: rowCount,
                     searchesCompleted: progress.completedSearches
                 });
                 
@@ -968,14 +1025,29 @@ async function processManualScrape() {
             console.log(`${LOG} Manual scrape aborted`);
             
             // Update execution record with current progress if aborted
+            // Use actual row count from sheet instead of scraped count
             const abortedState = currentState.manualScrapeState || state;
             if (abortedState.executionId) {
+                let rowCount = abortedState.totalProfiles || 0; // Fallback to scraped count
+                try {
+                    const execution = (await getFromStorage(['executionHistory'])).executionHistory?.find(
+                        e => e.id === abortedState.executionId
+                    );
+                    if (execution?.workbookId && execution?.tabName) {
+                        const { countRowsInTab } = await import('./sheets_api.js');
+                        rowCount = await countRowsInTab(execution.workbookId, execution.tabName);
+                    }
+                } catch (error) {
+                    // Fallback to scraped count if counting fails
+                    console.warn(`${LOG} Failed to count rows, using scraped count:`, error);
+                }
+                
                 await updateExecutionRecord(abortedState.executionId, {
                     status: 'failed',
                     completedAt: new Date().toISOString(),
                     error: 'Manually aborted',
                     searchesCompleted: i,
-                    profilesScraped: abortedState.totalProfiles || 0
+                    profilesScraped: rowCount
                 });
             }
             
@@ -1051,16 +1123,25 @@ async function processManualScrape() {
                 sourceName: sourceName
             });
             
-            // Wait for scraping to complete
-            const result = await waitForScrapingComplete(tab.id, 1800000);
+            // Wait for scraping to complete with periodic health checks
+            console.log(`${LOG} ⏳ Waiting for search "${search.title}" to complete...`);
+            const result = await waitForScrapingCompleteWithHealthCheck(tab.id, 1800000, sourceName, search.title);
             
             if (result?.timeout) {
-                console.error(`${LOG} ⚠️ Scraping timed out after 30 minutes - content script may be stuck`);
+                console.error(`${LOG} ⚠️ Search "${search.title}" timed out after 30 minutes - content script may be stuck`);
                 console.error(`${LOG} This usually means the scraper is stuck on the last page. Check content script logs.`);
                 // Continue to next search anyway to prevent getting stuck
+            } else if (result?.stuck) {
+                console.warn(`${LOG} ⚠️ Search "${search.title}" appears stuck (no activity detected) - moving to next search`);
+                // Continue to next search
             } else if (result?.aborted) {
                 console.log(`${LOG} Manual scrape aborted (${result.reason || 'unknown'})`);
                 return;
+            } else {
+                // Search completed successfully
+                const profilesScraped = result?.totalProfiles || 0;
+                const pagesScraped = result?.totalPages || 0;
+                console.log(`${LOG} ✅ Search "${search.title}" completed: ${profilesScraped} profiles from ${pagesScraped} pages`);
             }
             
             // Reload state to get updated totalProfiles
@@ -1110,21 +1191,40 @@ async function processManualScrape() {
         
         // Random delay between searches (45-90 seconds for anti-detection)
         const delay = getSearchDelay();
-        console.log(`${LOG} Waiting ${(delay/1000).toFixed(0)}s before next search...`);
+        const nextSearchIndex = i + 1;
+        if (nextSearchIndex < searches.length) {
+            const nextSearch = searches[nextSearchIndex];
+            console.log(`${LOG} ⏸️ Search ${i + 1}/${searches.length} complete. Waiting ${(delay/1000).toFixed(0)}s before starting search ${nextSearchIndex + 1}/${searches.length}: "${nextSearch.title}"`);
+        } else {
+            console.log(`${LOG} ⏸️ Search ${i + 1}/${searches.length} complete. Waiting ${(delay/1000).toFixed(0)}s before finalizing...`);
+        }
         await new Promise(resolve => setTimeout(resolve, delay));
         
         // Noise activity between searches
-        await performNoiseActivity(tab.id);
+        if (nextSearchIndex < searches.length) {
+            console.log(`${LOG} 🔄 Performing noise activity before next search...`);
+            await performNoiseActivity(tab.id);
+            console.log(`${LOG} 🚀 Starting search ${nextSearchIndex + 1}/${searches.length}...`);
+        }
     }
     
-    // Get final state to ensure we have the latest totalProfiles
-    const finalState = await getFromStorage(['manualScrapeState']);
-    const finalManualState = finalState.manualScrapeState || state;
-    const totalProfilesScraped = finalManualState.totalProfiles || 0;
+    // Get final stats - use actual row count from sheet instead of scraped count
+    let totalProfilesScraped = 0;
+    try {
+        const { countRowsInTab } = await import('./sheets_api.js');
+        totalProfilesScraped = await countRowsInTab(workbookId, tabName);
+    } catch (error) {
+        console.warn(`${LOG} Failed to count rows in sheet, using scraped count:`, error);
+        const finalState = await getFromStorage(['manualScrapeState']);
+        const finalManualState = finalState.manualScrapeState || state;
+        totalProfilesScraped = finalManualState.totalProfiles || 0;
+    }
     
     console.log(`${LOG} Manual scrape complete: ${totalProfilesScraped} profiles from ${searches.length} searches`);
     
     // Update execution record with final stats
+    const finalState = await getFromStorage(['manualScrapeState']);
+    const finalManualState = finalState.manualScrapeState || state;
     if (finalManualState.executionId) {
         await updateExecutionRecord(finalManualState.executionId, {
             status: 'completed',
@@ -1164,6 +1264,109 @@ async function processManualScrape() {
     }).catch(() => {});
 }
 
+/**
+ * Wait for scraping to complete with periodic health checks
+ * @param {number} tabId - Tab ID
+ * @param {number} timeout - Maximum timeout in ms
+ * @param {string} sourceName - Source name for logging
+ * @param {string} searchTitle - Search title for logging
+ * @returns {Promise<Object>} Result with timeout/stuck/aborted flags
+ */
+async function waitForScrapingCompleteWithHealthCheck(tabId, timeout, sourceName, searchTitle) {
+    return new Promise((resolve) => {
+        let lastActivityTime = Date.now();
+        let healthCheckInterval = null;
+        const HEALTH_CHECK_INTERVAL = 60000; // Check every 60 seconds
+        const STUCK_THRESHOLD = 180000; // 3 minutes of no activity = stuck
+        
+        // If there's already a waiter for this tab, abort it
+        abortScrapeWait(tabId, 'replaced');
+
+        const listener = (message, sender) => {
+            if (sender.tab?.id === tabId) {
+                // Update last activity time on any message from content script
+                lastActivityTime = Date.now();
+                
+                if (message.action === MESSAGE_ACTIONS.SCRAPING_COMPLETE) {
+                    cleanup();
+                    
+                    // Update manual scrape state with profiles from this search
+                    const profilesFromThisSearch = message.totalProfiles || 0;
+                    getFromStorage(['manualScrapeState']).then(async ({ manualScrapeState }) => {
+                        if (manualScrapeState?.isRunning) {
+                            manualScrapeState.totalProfiles = (manualScrapeState.totalProfiles || 0) + profilesFromThisSearch;
+                            await saveToStorage({ manualScrapeState });
+                        }
+                    });
+                    
+                    resolve(message);
+                    return;
+                }
+                
+                // Also listen for DATA_SCRAPED as activity indicator
+                if (message.action === MESSAGE_ACTIONS.DATA_SCRAPED) {
+                    // This indicates scraping is still active
+                    lastActivityTime = Date.now();
+                }
+            }
+        };
+        
+        // Health check: periodically check if content script is still active
+        healthCheckInterval = setInterval(async () => {
+            const timeSinceLastActivity = Date.now() - lastActivityTime;
+            const minutesSinceActivity = (timeSinceLastActivity / 1000 / 60).toFixed(1);
+            
+            // Log periodic status (every 2 minutes)
+            if (timeSinceLastActivity > 120000 && timeSinceLastActivity % 120000 < HEALTH_CHECK_INTERVAL) {
+                console.log(`${LOG} 💓 Health check: ${minutesSinceActivity} min since last activity for "${searchTitle}"`);
+            }
+            
+            if (timeSinceLastActivity > STUCK_THRESHOLD) {
+                console.warn(`${LOG} ⚠️ No activity detected for ${minutesSinceActivity} min (${(timeSinceLastActivity/1000).toFixed(0)}s) - content script may be stuck`);
+                console.warn(`${LOG} Checking content script status for "${searchTitle}"...`);
+                
+                try {
+                    // Try to ping the content script
+                    const status = await chrome.tabs.sendMessage(tabId, { action: MESSAGE_ACTIONS.GET_STATUS }).catch(() => null);
+                    
+                    if (status && status.isScrapingActive) {
+                        // Content script says it's still scraping, update activity time
+                        lastActivityTime = Date.now();
+                        console.log(`${LOG} ✅ Content script confirmed still scraping "${searchTitle}"`);
+                    } else {
+                        // Content script not responding or says it's not scraping
+                        console.warn(`${LOG} ⚠️ Content script appears stuck or finished for "${searchTitle}" - forcing completion`);
+                        cleanup();
+                        resolve({ stuck: true, reason: `No activity detected for ${minutesSinceActivity} minutes` });
+                    }
+                } catch (e) {
+                    // Can't reach content script - might be stuck or page navigated
+                    console.warn(`${LOG} ⚠️ Cannot reach content script for "${searchTitle}" - may be stuck: ${e.message}`);
+                    cleanup();
+                    resolve({ stuck: true, reason: 'Cannot reach content script' });
+                }
+            }
+        }, HEALTH_CHECK_INTERVAL);
+
+        const timeoutId = setTimeout(() => {
+            cleanup();
+            resolve({ timeout: true });
+        }, timeout);
+
+        function cleanup() {
+            chrome.runtime.onMessage.removeListener(listener);
+            clearTimeout(timeoutId);
+            if (healthCheckInterval) {
+                clearInterval(healthCheckInterval);
+            }
+            scrapeWaiters.delete(tabId);
+        }
+
+        scrapeWaiters.set(tabId, { resolve, cleanup });
+        chrome.runtime.onMessage.addListener(listener);
+    });
+}
+
 async function waitForScrapingComplete(tabId, timeout = 1800000) {
     return new Promise((resolve) => {
         // If there's already a waiter for this tab, abort it
@@ -1176,15 +1379,27 @@ async function waitForScrapingComplete(tabId, timeout = 1800000) {
                 const profilesFromThisSearch = message.totalProfiles || 0;
                 
                 // Update total profiles for auto-run state
-                getFromStorage(['autoRunState']).then(async ({ autoRunState }) => {
+                getFromStorage(['autoRunState', 'executionHistory']).then(async ({ autoRunState, executionHistory }) => {
                     if (autoRunState?.progress) {
                         autoRunState.progress.totalProfiles += profilesFromThisSearch;
                         await saveToStorage({ autoRunState });
                         
-                        // Update execution record with current profile count
+                        // Update execution record with actual row count from sheet
                         if (autoRunState.executionId) {
+                            let rowCount = autoRunState.progress.totalProfiles; // Fallback to scraped count
+                            try {
+                                const execution = executionHistory?.find(e => e.id === autoRunState.executionId);
+                                if (execution?.workbookId && execution?.tabName) {
+                                    const { countRowsInTab } = await import('./sheets_api.js');
+                                    rowCount = await countRowsInTab(execution.workbookId, execution.tabName);
+                                }
+                            } catch (error) {
+                                // Fallback to scraped count if counting fails
+                                console.warn(`${LOG} Failed to count rows, using scraped count:`, error);
+                            }
+                            
                             await updateExecutionRecord(autoRunState.executionId, {
-                                profilesScraped: autoRunState.progress.totalProfiles
+                                profilesScraped: rowCount
                             });
                             
                             // Notify popup of execution history update
@@ -1201,10 +1416,22 @@ async function waitForScrapingComplete(tabId, timeout = 1800000) {
                         manualScrapeState.totalProfiles = (manualScrapeState.totalProfiles || 0) + profilesFromThisSearch;
                         await saveToStorage({ manualScrapeState });
                         
-                        // Update execution record with current profile count
+                        // Update execution record with actual row count from sheet
                         if (manualScrapeState.executionId) {
+                            let rowCount = manualScrapeState.totalProfiles; // Fallback to scraped count
+                            try {
+                                const execution = executionHistory?.find(e => e.id === manualScrapeState.executionId);
+                                if (execution?.workbookId && execution?.tabName) {
+                                    const { countRowsInTab } = await import('./sheets_api.js');
+                                    rowCount = await countRowsInTab(execution.workbookId, execution.tabName);
+                                }
+                            } catch (error) {
+                                // Fallback to scraped count if counting fails
+                                console.warn(`${LOG} Failed to count rows, using scraped count:`, error);
+                            }
+                            
                             await updateExecutionRecord(manualScrapeState.executionId, {
-                                profilesScraped: manualScrapeState.totalProfiles
+                                profilesScraped: rowCount
                             });
                             
                             // Notify popup of execution history update
@@ -1723,6 +1950,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 }
                 
                 case MESSAGE_ACTIONS.STOP_AUTO_RUN: {
+                    console.log(`${LOG} STOP_AUTO_RUN requested - aborting scheduled scrape`);
                     autoRunState.isAborted = true;
                     autoRunState.isRunning = false;
                     await saveToStorage({ autoRunState });
@@ -1733,11 +1961,43 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         const stored = await getFromStorage([STORAGE_KEYS.DEDICATED_SCRAPE_TAB_ID]);
                         const tabId = stored[STORAGE_KEYS.DEDICATED_SCRAPE_TAB_ID];
                         if (tabId) {
+                            console.log(`${LOG} Aborting scrape wait for tab ${tabId}`);
                             abortScrapeWait(tabId, 'auto_run_stop');
                             await chrome.tabs.sendMessage(tabId, { action: MESSAGE_ACTIONS.STOP_SCRAPING }).catch(() => {});
                         }
                     } catch (e) {
-                        // ignore
+                        console.warn(`${LOG} Error stopping content script:`, e);
+                    }
+                    
+                    // Update execution record if it exists
+                    try {
+                        const currentState = await getFromStorage(['autoRunState', 'executionHistory']);
+                        if (currentState.autoRunState?.executionId) {
+                            const execution = currentState.executionHistory?.find(
+                                e => e.id === currentState.autoRunState.executionId
+                            );
+                            if (execution) {
+                                let rowCount = currentState.autoRunState.progress?.totalProfiles || 0;
+                                try {
+                                    if (execution.workbookId && execution.tabName) {
+                                        const { countRowsInTab } = await import('./sheets_api.js');
+                                        rowCount = await countRowsInTab(execution.workbookId, execution.tabName);
+                                    }
+                                } catch (error) {
+                                    console.warn(`${LOG} Failed to count rows:`, error);
+                                }
+                                
+                                await updateExecutionRecord(currentState.autoRunState.executionId, {
+                                    status: 'failed',
+                                    completedAt: new Date().toISOString(),
+                                    error: 'Manually aborted by user',
+                                    searchesCompleted: currentState.autoRunState.progress?.completedSearches || 0,
+                                    profilesScraped: rowCount
+                                });
+                            }
+                        }
+                    } catch (e) {
+                        console.warn(`${LOG} Error updating execution record on stop:`, e);
                     }
 
                     // Process pending schedules now that auto-run is stopped
@@ -1826,7 +2086,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 
                 // --- SCHEDULES ---
                 case MESSAGE_ACTIONS.GET_SCHEDULES: {
-                    const schedules = await getSchedules();
+                    const rawSchedules = await getSchedules();
+                    // Apply effective enabled state (including local overrides) for UI display
+                    const schedules = await Promise.all(
+                        rawSchedules.map(async (schedule) => {
+                            const effectiveEnabled = await getEffectiveEnabled(schedule);
+                            return {
+                                ...schedule,
+                                enabled: effectiveEnabled // Override with effective state for UI
+                            };
+                        })
+                    );
                     response = { success: true, schedules };
                     break;
                 }
@@ -1840,7 +2110,39 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         break;
                     }
 
+                    // Check if this is a user toggle (not a sync operation)
+                    // If enabled is explicitly set and schedule already exists, treat as user toggle
+                    const existingSchedules = await getSchedules();
+                    const existingSchedule = existingSchedules.find(s => s.id === schedule.id);
+                    
+                    // Get effective enabled state before the change to detect if user is toggling
+                    let previousEffectiveEnabled = existingSchedule?.enabled;
+                    if (existingSchedule) {
+                        previousEffectiveEnabled = await getEffectiveEnabled(existingSchedule);
+                    }
+                    
+                    const isUserToggle = existingSchedule && 
+                                         schedule.enabled !== undefined && 
+                                         schedule.enabled !== previousEffectiveEnabled &&
+                                         schedule.managedBy !== 'workbookSync';
+                    
                     const result = await setSchedule(schedule);
+                    
+                    // If this is a user toggle, set local override to preserve it across syncs
+                    if (isUserToggle) {
+                        // If user toggled back to match the base state, clear the override
+                        // Otherwise, set the override to the new state
+                        if (schedule.enabled === existingSchedule.enabled) {
+                            // User toggled back to base state, clear override
+                            await setScheduleLocalOverride(schedule.id, null);
+                            console.log(`${LOG} Cleared local override for ${schedule.sourceName} (back to base state)`);
+                        } else {
+                            // User toggled to different state, set override
+                            await setScheduleLocalOverride(schedule.id, schedule.enabled);
+                            console.log(`${LOG} Set local override for ${schedule.sourceName}: ${schedule.enabled}`);
+                        }
+                    }
+                    
                     response = { success: true, schedule: result };
                     break;
                 }
