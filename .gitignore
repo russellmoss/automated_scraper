@@ -22,6 +22,7 @@ desktop.ini
 # Editor directories
 .vscode/
 .idea/
+.cursor/
 *.swp
 *.swo
 *~
@@ -56,6 +57,10 @@ lerna-debug.log*
 node_modules/
 package-lock.json
 yarn.lock
+
+# BigQuery / Cloud Functions build artifacts
+big_query/cloud-functions/**/node_modules/
+big_query/cloud-functions/**/package-lock.json
 
 # Coverage directory used by tools like istanbul
 coverage/

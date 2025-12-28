@@ -47,6 +47,15 @@ import {
     setSyncInterval,
     getSyncInterval
 } from './sheet_sync.js';
+import {
+    initBigQueryConfig,
+    syncProfilesToBigQuery,
+    getOrCreateRecruiter,
+    createScrapeRun,
+    completeScrapeRun,
+    recordSearchObservations,
+    isConfigured as isBigQueryConfigured
+} from './bigquery_sync.js';
 import { CONFIG, ALARM_NAMES, MESSAGE_ACTIONS, STORAGE_KEYS, LOG_PREFIXES } from '../utils/constants.js';
 
 const LOG = LOG_PREFIXES.SERVICE_WORKER;
@@ -2313,9 +2322,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             await processPendingSchedules();
         }
         
+        // Initialize BigQuery sync config
+        await initBigQueryConfig().catch(e => {
+            console.warn(`${LOG} BigQuery config initialization failed (non-critical):`, e);
+        });
+        
         console.log(`${LOG} ✅ Service worker initialized (${SERVICE_WORKER_VERSION})`);
         console.log(`${LOG}    Workbooks: ${savedWorkbooks.length}`);
         console.log(`${LOG}    Mappings: ${Object.keys(sourceMapping).length}`);
+        console.log(`${LOG}    BigQuery: ${isBigQueryConfigured() ? '✅ Configured' : '⚠️ Not configured'}`);
         
     } catch (error) {
         console.error(`${LOG} Init error:`, error);

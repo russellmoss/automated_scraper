@@ -2,6 +2,7 @@
 
 import { appendRowsToTab, countRowsInTab } from './sheets_api.js';
 import { STORAGE_KEYS, CONFIG, LOG_PREFIXES } from '../utils/constants.js';
+import * as bigquerySync from './bigquery_sync.js';
 
 const LOG = LOG_PREFIXES.QUEUE;
 const MAX_RETRIES = CONFIG.MAX_RETRIES;
@@ -137,7 +138,77 @@ export async function processQueue() {
             await appendRowsToTab(item.spreadsheetId, item.tabName, item.rows);
             
             synced++;
-            console.log(`${LOG} ✅ Synced ${item.rows.length} rows (ID: ${item.id})`);
+            console.log(`${LOG} ✅ Synced ${item.rows.length} rows to Sheets (ID: ${item.id})`);
+            
+            // NEW: Sync to BigQuery (non-blocking - failures don't break the flow)
+            try {
+                // Check if BigQuery is configured by checking Chrome storage directly
+                const { bigquery_config } = await getFromStorage(['bigquery_config']);
+                const isBQConfigured = bigquery_config?.appsScriptWebAppUrl && 
+                                      bigquery_config.appsScriptWebAppUrl.includes('script.google.com');
+                
+                console.log(`${LOG} 🔍 BigQuery check: configured=${!!isBQConfigured}, url=${bigquery_config?.appsScriptWebAppUrl?.substring(0, 50)}...`);
+                
+                if (isBQConfigured) {
+                    console.log(`${LOG} ✅ BigQuery sync module available`);
+                    // Ensure config is loaded in the module
+                    await bigquerySync.initBigQueryConfig().catch(() => {});
+                    
+                    // Extract source name from first row (column 4 = Connection Source)
+                    const sourceName = item.rows?.[0]?.[4] || null;
+                    console.log(`${LOG} 🔍 Source name from row: "${sourceName}" (row[4])`);
+                    
+                    if (sourceName) {
+                        console.log(`${LOG} 🔄 Syncing ${item.rows.length} profiles to BigQuery for ${sourceName}...`);
+                        
+                        try {
+                            // Get or create recruiter in BigQuery
+                            const recruiterId = await bigquerySync.getOrCreateRecruiter(sourceName);
+                            if (recruiterId) {
+                                // Sync profiles to BigQuery
+                                const result = await bigquerySync.syncProfilesToBigQuery(
+                                    item.rows,
+                                    recruiterId,
+                                    sourceName,
+                                    null, // searchType - not available in queue context
+                                    null  // scrapeRunId - not available in queue context
+                                );
+                                console.log(`${LOG} ✅ BigQuery sync: ${result.synced} synced, ${result.errors} errors for ${sourceName}`);
+                                
+                                // Record observations (point-in-time data) - pass advisor_ids from sync result
+                                // This ensures we capture all scraped profiles for historical analysis with correct advisor_id linkage
+                                try {
+                                    // Pass advisorIds from sync result to observations (ensures correct linkage)
+                                    await bigquerySync.recordSearchObservations(
+                                        null, // scrapeRunId - not available in queue context
+                                        recruiterId,
+                                        null, // searchId - not available in queue context
+                                        null, // searchJobTitle - not available in queue context
+                                        item.rows, // profiles as Sheets row format
+                                        result.advisorIds // Pass advisor_ids from sync result - THIS IS THE KEY FIX!
+                                    );
+                                    console.log(`${LOG} ✅ Observations recorded for ${item.rows.length} profiles with advisor_ids`);
+                                } catch (obsError) {
+                                    // Don't fail the whole sync if observations fail
+                                    console.warn(`${LOG} ⚠️ Failed to record observations (non-critical):`, obsError);
+                                }
+                            } else {
+                                console.warn(`${LOG} ⚠️ Failed to get/create recruiter for ${sourceName}`);
+                            }
+                        } catch (syncError) {
+                            console.error(`${LOG} ⚠️ BigQuery sync error:`, syncError);
+                        }
+                    } else {
+                        console.warn(`${LOG} ⚠️ No source name found in row[4], skipping BigQuery sync`);
+                        console.log(`${LOG} 🔍 Row sample:`, item.rows?.[0]?.slice(0, 6));
+                    }
+                } else {
+                    console.log(`${LOG} ℹ️ BigQuery not configured, skipping sync`);
+                }
+            } catch (bqError) {
+                // BigQuery sync failures are non-critical - log but don't fail the queue item
+                console.error(`${LOG} ⚠️ BigQuery sync failed (non-critical):`, bqError);
+            }
             
             // Update execution history with actual row count from sheet
             // This gives us the real count of what's in the sheet (excluding header)

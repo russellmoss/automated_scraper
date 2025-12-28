@@ -41,6 +41,7 @@ LinkedIn competitive intelligence Chrome extension - scrape and track competitor
 
 - 🔍 **Automated LinkedIn Scraping** - Multi-layer extraction strategy resilient to LinkedIn DOM changes
 - 📊 **Google Sheets Integration** - Automatic data sync to Google Sheets with weekly tab management
+- 🗄️ **BigQuery Analytics Integration** - Real-time data sync to BigQuery for advanced analytics, CRM matching, and intelligence reports
 - 📘 **Savvy Pirate Command Center (Live Sync Workbook)** - One master workbook drives Searches, Mappings, and Schedules with live sync
 - ⏰ **Scheduled Scraping** - Per-source scheduling with automated execution
 - 🔔 **Zapier Webhooks** - Real-time notifications for scraping events with category filtering
@@ -80,6 +81,10 @@ The extension uses a **three-layer architecture**:
 LinkedIn Page → Content Script → Service Worker → Queue → Google Sheets API → Google Sheets
                                       ↓
                                 Webhook Notifications
+                                      ↓
+                            Apps Script Web App → BigQuery
+                                      ↓
+                            Analytics, CRM Matching, Reports
 ```
 
 ### Scraping Process
@@ -867,7 +872,8 @@ automated_scraper/
 │   ├── sheets_api.js          # Google Sheets API wrapper
 │   ├── sync_queue.js          # Local queue with retry logic
 │   ├── scheduler.js           # Schedule management and execution history
-│   └── notifications.js       # Zapier webhook notifications
+│   ├── notifications.js       # Zapier webhook notifications
+│   └── bigquery_sync.js       # 🆕 BigQuery sync via Apps Script Web App
 ├── content/
 │   └── content.js             # LinkedIn DOM scraping
 ├── popup/
@@ -880,6 +886,19 @@ automated_scraper/
 │   ├── icon16.png
 │   ├── icon48.png
 │   └── icon128.png
+├── big_query/                 # 🆕 BigQuery integration files
+│   ├── SAVVY_PIRATE_BIGQUERY_IMPLEMENTATION_GUIDE.md  # Complete setup guide
+│   ├── apps-script/
+│   │   └── Code.gs            # Apps Script Web App code
+│   ├── sql/                   # Export queries
+│   │   ├── 01_export_new_advisors.sql
+│   │   ├── 02_export_on_the_move.sql
+│   │   ├── 03_export_crm_matches.sql
+│   │   ├── 04_export_job_changes.sql
+│   │   ├── 05_export_reconstruct_scrape.sql
+│   │   ├── 06_export_disappeared_connections.sql
+│   │   └── 07_weekly_summary_dashboard.sql
+│   └── MONDAY_ANALYSIS_SCRIPT.sql  # Scheduled analysis query
 ├── linkedin-diagnostic.js     # Selector maintenance tool
 └── README.md                  # This file
 ```
@@ -892,6 +911,7 @@ When debugging, look for these log prefixes in the service worker console:
 - `[AUTH]` - Authentication
 - `[QUEUE]` - Sync queue operations
 - `[SHEETS]` - Sheets API calls
+- `[BIGQUERY]` - BigQuery sync operations
 - `[SCHEDULE]` - Scheduling operations
 - `[NOTIFY]` - Webhook notifications
 - `[CS]` - Content script (in browser console on LinkedIn pages)
@@ -1044,6 +1064,282 @@ Failed syncs are automatically retried:
 - Failed items moved to failed queue after max retries
 - Manual retry available from popup footer
 
+## BigQuery Analytics Integration
+
+### Overview
+
+Savvy Pirate includes a **complete BigQuery analytics integration** that automatically syncs all scraped data to Google BigQuery for advanced analysis, CRM matching, and intelligence reporting. This enables:
+
+- 📊 **Advanced Analytics** - Track advisor movement patterns, network growth, and trends
+- 🔗 **CRM Matching** - Automatically match discovered advisors with existing Salesforce leads/opportunities
+- 🎯 **Priority Scoring** - Identify high-value advisors using FINTRX CRD data (registered RIAs)
+- 📈 **Weekly Analysis** - Automated Monday morning reports with new advisors, movement alerts, and CRM matches
+- 📋 **Export Queries** - Pre-built SQL queries for CSV exports to your sales team
+
+### Architecture
+
+```
+Chrome Extension (Scraping)
+    ↓
+Apps Script Web App (No GCP permissions needed!)
+    ↓
+BigQuery Dataset: savvy-gtm-analytics.savvy_pirate
+    ↓
+    ├── Core Tables (advisors, connections, observations)
+    ├── Analysis Tables (weekly_analyses, new_advisor_reports, etc.)
+    ├── Views (v_advisors_on_move, v_crm_matches, v_advisors_with_crd)
+    └── Scheduled Queries (Monday 6 AM ET automated analysis)
+```
+
+### What Gets Synced
+
+Every time the extension scrapes LinkedIn profiles, data is automatically synced to BigQuery:
+
+1. **Advisors Table** - All discovered advisors with LinkedIn URLs, titles, locations, accreditations
+2. **Connections Table** - Links advisors to recruiters (who found them)
+3. **Connection Observations** - Point-in-time snapshots of every scrape (enables historical reconstruction)
+4. **Scrape Runs** - Execution history and metadata
+
+### Key Features
+
+#### 1. **CRM Matching**
+Automatically matches discovered advisors with your Salesforce CRM:
+- **LinkedIn URL matching** (highest confidence)
+- **Fuzzy name matching** (fallback)
+- Identifies re-engagement opportunities (closed-lost leads now active)
+- Shows lead/opportunity status, owner, and disposition
+
+#### 2. **Advisor Movement Detection**
+Identifies advisors appearing in multiple recruiter networks:
+- Flags advisors seen with 2+ different recruiters
+- Severity levels: Normal, High, Critical
+- Timeline tracking (first appearance → latest appearance)
+- Strong signal of active job searching
+
+#### 3. **FINTRX CRD Enrichment**
+Enriches advisors with CRD (Central Registration Depository) numbers:
+- Identifies registered investment advisors
+- Shows firm name, AUM, and producing advisor status
+- Priority scoring: HIGH (producing advisor) → MEDIUM (registered RIA) → NORMAL
+
+#### 4. **Weekly Automated Analysis**
+Every Monday at 6 AM ET, a scheduled query automatically:
+- Finds new advisors (seen in current 2-week period but not previous)
+- Detects advisors "on the move" (multi-recruiter appearances)
+- Matches with CRM data
+- Detects job changes (title/company changes)
+- Populates analysis tables ready for export
+
+### Setup & Configuration
+
+#### Prerequisites
+
+1. **Google Cloud Project**: `savvy-gtm-analytics`
+2. **BigQuery Dataset**: `savvy_pirate` (created automatically)
+3. **Apps Script Web App**: Deployed and configured (see below)
+
+#### Apps Script Web App Setup
+
+The BigQuery sync uses a **Google Apps Script Web App** (no GCP admin permissions required):
+
+1. **Apps Script Project**: Already created at `big_query/apps-script/Code.gs`
+2. **Deployment URL**: Configured in Chrome Extension storage
+3. **BigQuery Access**: Uses BigQuery Advanced Service (enabled in Apps Script)
+
+**Current Configuration:**
+- **Web App URL**: `https://script.google.com/macros/s/AKfycbyLyTEijCY6DZTMw-9u6gxTnd9LqNvWlnUAQWzHyDzgD0n7WllJ8zIdFIlPR_p-h_rx/exec`
+- **Status**: ✅ Deployed and operational
+
+#### Chrome Extension Configuration
+
+The extension automatically syncs to BigQuery when configured:
+
+1. **Apps Script URL** is stored in extension storage
+2. **Automatic Sync** happens after each scrape (non-blocking)
+3. **Error Handling** - Failures don't break the scraping flow
+
+**To verify BigQuery sync is working:**
+- Check service worker console for `[BIGQUERY] ✅ Sync complete` messages
+- Query BigQuery: `SELECT COUNT(*) FROM savvy-gtm-analytics.savvy_pirate.advisors`
+
+### BigQuery Dataset Structure
+
+#### Core Tables
+
+| Table | Purpose | Key Fields |
+|-------|---------|------------|
+| `recruiters` | Monitored recruiters (29) | name, frequency, output_sheet_url |
+| `searches` | LinkedIn search URLs (261) | recruiter_id, target_job_title, linkedin_search_url |
+| `advisors` | All discovered advisors | name, linkedin_url, current_title, accreditations |
+| `connections` | Advisor ↔ Recruiter links | advisor_id, recruiter_id, first_seen_date |
+| `connection_observations` | Point-in-time scrape snapshots | observed_at, advisor_name, advisor_title |
+| `scrape_runs` | Execution history | started_at, completed_at, profiles_scraped |
+
+#### Analysis Tables
+
+| Table | Purpose | When Populated |
+|-------|---------|----------------|
+| `weekly_analyses` | Analysis run logs | Every Monday 6 AM ET |
+| `new_advisor_reports` | New advisors discovered | After Monday analysis |
+| `advisor_movement_alerts` | Multi-recruiter appearances | After Monday analysis |
+| `crm_match_results` | Salesforce matches | After Monday analysis |
+| `advisor_job_changes` | Title/company changes | After Monday analysis |
+
+#### Views (Use These for Queries)
+
+| View | Purpose | Why Use This |
+|------|---------|--------------|
+| `v_observations_with_advisors` | **CRITICAL** - Observations with correct advisor_id | Always use this instead of `connection_observations` directly |
+| `v_advisors_on_move` | Advisors in 2+ recruiter networks | For movement detection |
+| `v_crm_matches` | Advisors matched to Salesforce | For CRM re-engagement |
+| `v_advisors_with_crd` | Advisors with FINTRX CRD data | For priority scoring |
+| `v_disappeared_connections` | Connections that disappeared | For network changes |
+| `v_scrape_history` | Historical scrape summary | For trend analysis |
+
+### Creating Reports
+
+#### 1. Weekly Analysis (Automated)
+
+**Scheduled Query**: Runs every Monday at 6 AM ET automatically
+- **Location**: BigQuery Console → Scheduled Queries → "Savvy Pirate Weekly Analysis"
+- **What it does**: Finds new advisors, detects movement, matches CRM, detects job changes
+- **Output**: Populates `new_advisor_reports`, `advisor_movement_alerts`, `crm_match_results`
+
+#### 2. Export Queries (Manual - Run After Monday Analysis)
+
+All export queries are saved in BigQuery Console under "Savvy Pirate Exports":
+
+**Location**: BigQuery Console → Queries → "Savvy Pirate Exports" folder
+
+| Query Name | Purpose | When to Run |
+|------------|---------|------------|
+| **Export - New Advisors** | New advisors with CRD enrichment | After Monday analysis |
+| **Export - On The Move** | Multi-recruiter movement alerts | After Monday analysis |
+| **Export - CRM Matches** | Salesforce re-engagement opportunities | After Monday analysis |
+| **Export - Job Changes** | Advisors with title/company changes | After Monday analysis |
+| **Export - Reconstruct Past Scrape** | Point-in-time data for specific scrape | Anytime (requires date/recruiter) |
+| **Export - Disappeared Connections** | Connections that disappeared | Anytime |
+| **Weekly Summary Dashboard** | Analysis summary metrics | After Monday analysis |
+
+**How to Run Export Queries:**
+
+1. Go to [BigQuery Console](https://console.cloud.google.com/bigquery?project=savvy-gtm-analytics)
+2. Navigate to **Queries** → **Savvy Pirate Exports**
+3. Open the query you want (e.g., "Export - New Advisors")
+4. Click **Run**
+5. Click **Save Results** → **CSV (local file)**
+6. Filename: `new_advisors_YYYY-MM-DD.csv`
+
+**Query Files Location:**
+- All export queries are saved in: `big_query/sql/`
+- Files: `01_export_new_advisors.sql`, `02_export_on_the_move.sql`, etc.
+
+#### 3. Custom Analysis Queries
+
+You can write custom SQL queries using the views and tables:
+
+**Example: Find high-priority advisors from this week**
+```sql
+SELECT 
+  nar.advisor_name,
+  nar.title,
+  nar.linkedin_url,
+  ea.lead_priority,
+  ea.crd_firm_name,
+  ea.crd_firm_aum
+FROM `savvy-gtm-analytics.savvy_pirate.new_advisor_reports` nar
+LEFT JOIN `savvy-gtm-analytics.savvy_pirate.v_advisors_with_crd` ea
+  ON nar.advisor_id = ea.advisor_id
+WHERE nar.analysis_date = (
+  SELECT MAX(analysis_date) 
+  FROM `savvy-gtm-analytics.savvy_pirate.weekly_analyses`
+  WHERE status = 'completed'
+)
+ORDER BY 
+  CASE ea.lead_priority 
+    WHEN 'HIGH - Registered Producing Advisor' THEN 1
+    WHEN 'MEDIUM - Registered RIA' THEN 2
+    ELSE 3
+  END;
+```
+
+### Key Metrics & Insights
+
+#### Weekly Metrics (After Monday Analysis)
+
+- **New Advisors**: Count of advisors seen for the first time
+- **On The Move**: Advisors appearing in 2+ recruiter networks
+- **CRM Matches**: Advisors already in Salesforce (re-engagement opportunities)
+- **CRD Matches**: Registered RIAs identified via FINTRX
+- **Job Changes**: Advisors with title/company changes (strong transition signal)
+
+#### Priority Scoring
+
+Advisors are automatically scored based on FINTRX data:
+
+1. **HIGH - Registered Producing Advisor**: Has CRD number + is producing advisor
+2. **MEDIUM - Registered RIA**: Has CRD number (registered but not producing)
+3. **NORMAL - Not in FINTRX**: No CRD match found
+
+### Troubleshooting BigQuery Integration
+
+#### No Data in BigQuery
+
+1. **Check Apps Script URL**: Verify it's configured in extension storage
+2. **Check Service Worker Console**: Look for `[BIGQUERY]` log messages
+3. **Test Connection**: Run a test scrape and check for sync messages
+4. **Verify Apps Script**: Test the Web App URL directly in browser
+
+#### Advisor ID Mismatch
+
+If you see hash IDs (like `adv_abc123...`) instead of UUIDs in `connection_observations`:
+
+- **Solution**: Always use `v_observations_with_advisors` view instead of the base table
+- **Why**: BigQuery streaming tables can't be updated immediately after insert
+- **The view**: Automatically corrects advisor_id by joining with advisors table
+
+**Example:**
+```sql
+-- ✅ CORRECT: Use the view
+SELECT * FROM `savvy-gtm-analytics.savvy_pirate.v_observations_with_advisors`
+WHERE observed_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY);
+
+-- ❌ WRONG: Don't query base table directly
+-- SELECT * FROM connection_observations  -- May have hash IDs
+```
+
+#### Monday Analysis Not Running
+
+1. **Check Scheduled Query**: BigQuery Console → Scheduled Queries
+2. **Verify Schedule**: Should be "Every Monday at 06:00" (America/New_York)
+3. **Check Execution History**: BigQuery Console → Scheduled Queries → Execution history
+4. **Manual Test**: Run the query manually to check for errors
+
+#### Export Queries Return No Data
+
+1. **Check Analysis Date**: Ensure Monday analysis has run
+2. **Verify Data Exists**: Query `weekly_analyses` table to see latest analysis_date
+3. **Check Filters**: Export queries filter by latest completed analysis
+4. **Run Analysis Manually**: If needed, run the Monday analysis query manually
+
+### Documentation
+
+For complete implementation details, see:
+- **Implementation Guide**: `big_query/SAVVY_PIRATE_BIGQUERY_IMPLEMENTATION_GUIDE.md`
+- **SQL Queries**: `big_query/sql/` directory
+- **Apps Script Code**: `big_query/apps-script/Code.gs`
+
+### Quick Reference
+
+**BigQuery Project**: `savvy-gtm-analytics`  
+**Dataset**: `savvy_pirate`  
+**Region**: `northamerica-northeast2` (Toronto)  
+**Apps Script Web App**: Configured in extension storage  
+**Scheduled Analysis**: Monday 6 AM ET  
+**Export Queries**: BigQuery Console → Queries → "Savvy Pirate Exports"
+
+---
+
 ## Support
 
 For issues or questions:
@@ -1052,6 +1348,7 @@ For issues or questions:
 3. Use `linkedin-diagnostic.js` if scraping fails
 4. Check Google Sheets API quota if data sync fails
 5. Review execution history for detailed error information
+6. For BigQuery issues, check `big_query/SAVVY_PIRATE_BIGQUERY_IMPLEMENTATION_GUIDE.md`
 
 ## License
 
@@ -1059,5 +1356,6 @@ For issues or questions:
 
 ---
 
-**Version**: 2.0.0  
-**Last Updated**: December 2024
+**Version**: 2.1.0  
+**Last Updated**: December 2024  
+**BigQuery Integration**: ✅ Production Ready (Phases 0-7 Complete)
