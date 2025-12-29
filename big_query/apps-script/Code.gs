@@ -593,7 +593,7 @@ function recordObservation(data) {
     advisor_name: advisor_name || null,
     advisor_title: advisor_title || null,
     advisor_location: advisor_location || null,
-    advisor_linkedin_url: advisor_linkedin_url || null,
+    advisor_linkedin_url: normalizeLinkedInUrl(advisor_linkedin_url) || null,  // ✅ FIXED: Now normalized
     search_job_title: search_job_title || null,
     created_at: new Date().toISOString()
   }]);
@@ -719,7 +719,7 @@ function recordObservationsBatch(data) {
       advisor_name: profile.name || null,
       advisor_title: profile.title || null,
       advisor_location: profile.location || null,
-      advisor_linkedin_url: profile.linkedin_url || null,
+      advisor_linkedin_url: normalizeLinkedInUrl(profile.linkedin_url) || null,  // ✅ FIXED: Now normalized
       search_job_title: search_job_title || null,
       created_at: now
     });

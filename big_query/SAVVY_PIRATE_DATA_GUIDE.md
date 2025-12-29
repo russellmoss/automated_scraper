@@ -591,7 +591,11 @@ LIMIT 10;
 
 ```sql
 -- Export new advisors (use existing query: 01_export_new_advisors.sql)
--- This query includes CRD enrichment
+-- ⚠️ NOTE: The export query has been enhanced to compare recent scrapes
+-- instead of using Monday analysis results. It finds advisors who appeared
+-- in the latest scrape but NOT in the previous scrape.
+
+-- Alternative: Query Monday analysis results directly (if you prefer the old approach)
 SELECT
   nar.advisor_name,
   nar.title,
@@ -850,6 +854,83 @@ WHERE lead_priority = 'HIGH - Registered Producing Advisor'
 ORDER BY crd_firm_aum DESC NULLS LAST
 LIMIT 100;
 ```
+
+---
+
+### 4.2.1 v_advisors_with_fintrx
+
+**Purpose:** ⭐ **ENHANCED VERSION** - Advanced FINTRX enrichment view with lead scoring tiers. This is an enhanced version of `v_advisors_with_crd` with additional features for lead prioritization.
+
+**Key Enhancements:**
+- Wirehouse exclusion logic (filters out wirehouse advisors)
+- Advisor mobility tracking (firm moves from employment history)
+- License detection (Series 65, Series 7, Series 65-only)
+- Certification detection (CFP, CFA from bio/title)
+- Experience metrics (industry tenure, firm tenure)
+- Lead priority tiers (TIER 1-5) aligned with V3.2 model
+
+**Columns:**
+- All columns from `advisors`
+- **Match info:** `crd_number`, `match_type`, `fintrx_first_name`, `fintrx_last_name`
+- **Firm info:** `crd_firm_name`, `firm_crd`, `crd_firm_aum`, `firm_rep_count`, `firm_classification`
+- **Job info:** `fintrx_job_title`, `rep_type`
+- **Lead scoring flags:**
+  - `is_producing_advisor` - Boolean (1/0)
+  - `is_wirehouse` - Boolean (1/0)
+  - `is_independent` - Boolean (1/0)
+  - `has_series_65`, `has_series_65_only`, `has_series_7` - Boolean flags
+  - `has_cfp`, `has_cfa` - Boolean flags
+  - `rep_licenses` - Full license string
+- **Experience & mobility:**
+  - `industry_tenure_years`, `industry_tenure_months`
+  - `current_firm_tenure_years`
+  - `num_prior_firms` - Number of previous firms
+  - `has_7plus_years_experience` - Boolean
+  - `has_moved_firms`, `has_moved_firms_2plus` - Boolean flags
+- **Lead priority:** `'TIER 1 - Independent Producing 7+ Yrs + Has Moved'`, `'TIER 2 - Independent Producing 7+ Yrs'`, `'TIER 3 - Independent Producing Advisor'`, `'TIER 4 - Fee-Only RIA (Series 65 Only)'`, `'TIER 5 - Registered Advisor'`, or `'NOT IN FINTRX'`
+
+**Lead Priority Tiers:**
+- **TIER 1:** Independent producing advisor, 7+ years experience, has moved firms
+- **TIER 2:** Independent producing advisor, 7+ years experience
+- **TIER 3:** Independent producing advisor
+- **TIER 4:** Fee-only RIA (Series 65 only)
+- **TIER 5:** Registered advisor (in FINTRX but doesn't meet higher tiers)
+
+**Example Query:**
+
+```sql
+-- Find TIER 1 leads (highest priority)
+SELECT 
+  advisor_name,
+  current_title,
+  linkedin_url,
+  crd_number,
+  crd_firm_name,
+  ROUND(crd_firm_aum / 1000000, 1) AS firm_aum_millions,
+  industry_tenure_years,
+  num_prior_firms,
+  lead_priority
+FROM `savvy-gtm-analytics.savvy_pirate.v_advisors_with_fintrx`
+WHERE lead_priority = 'TIER 1 - Independent Producing 7+ Yrs + Has Moved'
+ORDER BY crd_firm_aum DESC NULLS LAST
+LIMIT 100;
+
+-- Find independent advisors with Series 65 only (fee-only RIAs)
+SELECT 
+  advisor_name,
+  current_title,
+  linkedin_url,
+  crd_firm_name,
+  lead_priority
+FROM `savvy-gtm-analytics.savvy_pirate.v_advisors_with_fintrx`
+WHERE has_series_65_only = 1
+  AND is_independent = 1
+ORDER BY industry_tenure_years DESC;
+```
+
+**When to use:**
+- Use `v_advisors_with_fintrx` for lead scoring and prioritization
+- Use `v_advisors_with_crd` for basic CRD matching (simpler, faster)
 
 ---
 
@@ -1497,15 +1578,42 @@ All SQL files are located in: `big_query/sql/`
 
 ### 7.1 Export Queries
 
-#### `01_export_new_advisors.sql`
-**Purpose:** Export new advisors discovered in the latest Monday analysis with CRD enrichment.
+**📌 Important Update:** The `01_export_new_advisors.sql` query has been enhanced (December 2024) to use a scrape comparison approach instead of relying solely on Monday analysis results. This provides more real-time detection of new advisors by comparing the two most recent scrapes per recruiter and uses the enhanced `v_advisors_with_fintrx` view for comprehensive lead scoring.
 
-**When to use:** After Monday analysis completes. Download as CSV for sales outreach.
+#### `01_export_new_advisors.sql`
+**Purpose:** ⭐ **ENHANCED** - Export truly NEW advisors by comparing the two most recent scrapes per recruiter. Finds advisors who appeared in the latest scrape but NOT in the previous scrape (at least 5 days apart). Uses enhanced FINTRX enrichment (`v_advisors_with_fintrx`) for comprehensive lead scoring.
+
+**When to use:** Anytime (not dependent on Monday analysis). Run when you want to find advisors who just appeared in recruiter networks. Download as CSV for sales outreach.
 
 **Key features:**
-- Includes CRD number, lead priority, firm AUM
-- Sorted by priority (HIGH → MEDIUM → NORMAL)
-- Includes accreditations, recruiter name, search type
+- **Scrape comparison logic:** Compares most recent scrape vs. previous scrape (minimum 5 days apart)
+- **Enhanced FINTRX enrichment:** Uses `v_advisors_with_fintrx` view with lead scoring tiers
+- **Salesforce CRM matching:** Automatically matches advisors to existing Leads/Opportunities by CRD number
+  - **Prioritizes Opportunity over Lead** if both exist for the same CRD
+  - Shows SGA owner name for Leads, SGM owner name for Opportunities
+  - Includes Lead status, Disposition, and Opportunity stage, closed lost reason
+- **Comprehensive lead flags:**
+  - Producing advisor status
+  - Independent vs. wirehouse
+  - License detection (Series 65, Series 7, Series 65-only)
+  - Certification detection (CFP, CFA)
+  - Experience metrics (industry tenure, firm tenure)
+  - Mobility indicators (prior firms, firm moves)
+- **Firm intelligence:** Firm AUM, rep count, classification, job title from FINTRX
+- **Smart sorting:** Prioritizes TIER 1 leads (independent producing, 7+ years, has moved firms)
+- **Scrape metadata:** Shows which scrapes were compared (`Compared_To_Scrape`, `Found_In_Scrape`)
+
+**Requirements:**
+- Recruiters must have at least 2 completed scrapes with 100+ unique advisors each
+- Scrapes must be at least 5 days apart
+- Only includes recruiters with completed scrapes
+
+**CRM Matching Logic:**
+- Matches advisors to Salesforce by CRD number (`FA_CRD__c` field)
+- **Prioritizes Opportunity over Lead** - if an advisor has both a Lead and Opportunity, only Opportunity fields are shown
+- **Lead fields shown:** Lead Name, Status, SGA Owner Name, Disposition
+- **Opportunity fields shown:** Opportunity Name, Stage, SGM Owner Name, Closed Lost Reason, Amount
+- If no CRD number is available from FINTRX, CRM matching is skipped
 
 ---
 
@@ -1772,6 +1880,9 @@ LIMIT 1;
 **Step 2:** Export new advisors
 ```sql
 -- Run: 01_export_new_advisors.sql
+-- This query compares the two most recent scrapes per recruiter
+-- to find truly NEW advisors (not just from Monday analysis)
+-- Includes enhanced FINTRX enrichment with lead scoring tiers
 -- Download as CSV
 ```
 
@@ -1871,6 +1982,7 @@ LIMIT 100;
 | **New advisors (last 14 days)** | `SELECT * FROM advisors WHERE first_seen_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 14 DAY)` |
 | **Advisors on the move** | `SELECT * FROM v_advisors_on_move WHERE severity = 'critical'` |
 | **High-priority leads** | `SELECT * FROM v_advisors_with_crd WHERE lead_priority = 'HIGH - Registered Producing Advisor'` |
+| **TIER 1 leads (enhanced)** | `SELECT * FROM v_advisors_with_fintrx WHERE lead_priority = 'TIER 1 - Independent Producing 7+ Yrs + Has Moved'` |
 | **CRM matches** | `SELECT * FROM v_crm_matches WHERE alert_priority = 'high'` |
 | **Recent scrapes** | `SELECT * FROM scrape_runs WHERE started_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)` |
 | **Reconstruct scrape** | Use `05_export_reconstruct_scrape.sql` (replace placeholders) |
@@ -1893,7 +2005,8 @@ LIMIT 100;
 | View | Primary Use |
 |------|-------------|
 | `v_observations_with_advisors` | ⚠️ **ALWAYS use this** for observations (corrects advisor_id) |
-| `v_advisors_with_crd` | CRD enrichment (FINTRX data) |
+| `v_advisors_with_crd` | Basic CRD enrichment (FINTRX data) |
+| `v_advisors_with_fintrx` | ⭐ **Enhanced** CRD enrichment with lead scoring tiers |
 | `v_advisors_on_move` | Real-time "on the move" advisors |
 | `v_crm_matches` | Salesforce CRM matches |
 | `v_scrape_history` | Scrape summary by recruiter/date |
@@ -1903,7 +2016,7 @@ LIMIT 100;
 
 | File | Purpose | When to Run |
 |------|---------|-------------|
-| `01_export_new_advisors.sql` | New advisors with CRD | After Monday analysis |
+| `01_export_new_advisors.sql` | ⭐ **Enhanced** - New advisors (scrape comparison) with FINTRX enrichment | Anytime (compares recent scrapes) |
 | `02_export_on_the_move.sql` | Movement alerts | After Monday analysis |
 | `03_export_crm_matches.sql` | CRM re-engagement | After Monday analysis |
 | `04_export_job_changes.sql` | Job changes | After Monday analysis |
