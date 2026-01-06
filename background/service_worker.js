@@ -1027,6 +1027,25 @@ async function processManualScrape() {
         // Get or create dedicated scrape tab (always uses the same tab)
     const tab = await getOrCreateDedicatedScrapeTab();
     
+    // === Create BigQuery scrape run ===
+    let bqScrapeRunId = null;
+    let bqRecruiterId = null;
+    if (isBigQueryConfigured()) {
+        try {
+            bqRecruiterId = await getOrCreateRecruiter(sourceName);
+            bqScrapeRunId = await createScrapeRun(bqRecruiterId, sourceName, searches.length);
+            console.log(`${LOG} 📊 BigQuery scrape run created: ${bqScrapeRunId}`);
+            
+            // Store in state so we can complete it later
+            state.bqScrapeRunId = bqScrapeRunId;
+            state.bqRecruiterId = bqRecruiterId;
+            await saveToStorage({ manualScrapeState: state });
+        } catch (e) {
+            console.warn(`${LOG} BigQuery scrape run creation failed (non-critical):`, e);
+        }
+    }
+    // === END BigQuery scrape run creation ===
+    
     for (let i = currentSearchIndex; i < searches.length; i++) {
         // Check for abort
         const currentState = await getFromStorage(['manualScrapeState']);
@@ -1059,6 +1078,25 @@ async function processManualScrape() {
                     profilesScraped: rowCount
                 });
             }
+            
+            // === Complete BigQuery scrape run (aborted) ===
+            const abortedBqRunId = abortedState.bqScrapeRunId;
+            if (abortedBqRunId && isBigQueryConfigured()) {
+                try {
+                    await completeScrapeRun(
+                        abortedBqRunId,
+                        rowCount,              // profilesScraped
+                        0,                      // newConnections (we don't track this yet)
+                        i,                      // searchesCompleted
+                        'partial',              // status
+                        'Scrape was stopped by user' // error
+                    );
+                    console.log(`${LOG} 📊 BigQuery scrape run completed (aborted): ${abortedBqRunId}`);
+                } catch (e) {
+                    console.warn(`${LOG} BigQuery scrape run completion failed (non-critical):`, e);
+                }
+            }
+            // === END BigQuery scrape run completion (aborted) ===
             
             // Always reset state when aborted to prevent stuck state
             manualScrapeState.isRunning = false;
@@ -1247,6 +1285,25 @@ async function processManualScrape() {
             console.error(`${LOG} Failed to send completion notification:`, e);
         });
     }
+    
+    // === Complete BigQuery scrape run ===
+    const finalBqRunId = finalManualState.bqScrapeRunId;
+    if (finalBqRunId && isBigQueryConfigured()) {
+        try {
+            await completeScrapeRun(
+                finalBqRunId,
+                totalProfilesScraped,      // profilesScraped
+                0,                          // newConnections (we don't track this yet)
+                searches.length,            // searchesCompleted
+                'completed',                // status
+                null                        // error
+            );
+            console.log(`${LOG} 📊 BigQuery scrape run completed: ${finalBqRunId}`);
+        } catch (e) {
+            console.warn(`${LOG} BigQuery scrape run completion failed (non-critical):`, e);
+        }
+    }
+    // === END BigQuery scrape run completion ===
     
     manualScrapeState.isRunning = false;
     manualScrapeState.isAborted = false;
