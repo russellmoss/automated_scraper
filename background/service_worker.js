@@ -57,6 +57,7 @@ import {
     isConfigured as isBigQueryConfigured
 } from './bigquery_sync.js';
 import { CONFIG, ALARM_NAMES, MESSAGE_ACTIONS, STORAGE_KEYS, LOG_PREFIXES } from '../utils/constants.js';
+import { getDeviceId, getDeviceInfo } from './device_id.js';
 
 const LOG = LOG_PREFIXES.SERVICE_WORKER;
 const SERVICE_WORKER_VERSION = '2025-12-17-testmode-v1';
@@ -453,6 +454,17 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 chrome.runtime.onInstalled.addListener(async () => {
     try {
         console.log(`${LOG} Extension installed/updated`);
+        
+        // Initialize device ID on install/update
+        try {
+            const deviceId = await getDeviceId();
+            const deviceInfo = getDeviceInfo();
+            console.log(`[SW] 📱 Device ID: ${deviceId}`);
+            console.log(`[SW]    Platform: ${deviceInfo.platform}`);
+        } catch (error) {
+            console.error('[SW] Failed to initialize device ID:', error);
+        }
+        
         const cfg = await getWorkbookConfig();
         if (cfg?.workbookId) {
             const syncInterval = await getSyncInterval();
@@ -467,6 +479,17 @@ chrome.runtime.onInstalled.addListener(async () => {
 chrome.runtime.onStartup.addListener(async () => {
     try {
         console.log(`${LOG} Extension startup`);
+        
+        // Initialize device ID on startup
+        try {
+            const deviceId = await getDeviceId();
+            const deviceInfo = getDeviceInfo();
+            console.log(`[SW] 📱 Device ID: ${deviceId}`);
+            console.log(`[SW]    Platform: ${deviceInfo.platform}`);
+        } catch (error) {
+            console.error('[SW] Failed to initialize device ID:', error);
+        }
+        
         const cfg = await getWorkbookConfig();
         if (cfg?.workbookId) {
             const syncInterval = await getSyncInterval();
@@ -484,6 +507,46 @@ chrome.runtime.onStartup.addListener(async () => {
 async function executeScheduledRun(schedule) {
     console.log(`${LOG} Executing scheduled run for ${schedule.sourceName}`);
     
+    // ============================================================
+    // DEVICE ISOLATION - Claim schedule execution
+    // ============================================================
+    const myDeviceId = await getDeviceId();
+    const scheduleName = schedule.sourceName;
+    const executionKey = `scheduleExecution_${scheduleName.replace(/\s+/g, '_')}`;
+    
+    // Check if another device is already running this schedule
+    const { [executionKey]: existingExecution } = await chrome.storage.local.get([executionKey]);
+    
+    if (existingExecution) {
+        const executionAge = Date.now() - existingExecution.startedAt;
+        const maxAge = 60 * 60 * 1000; // 1 hour max execution time
+        
+        if (existingExecution.deviceId !== myDeviceId && executionAge < maxAge) {
+            console.log(`${LOG} ⏭️ Skipping "${scheduleName}" - already running on device: ${existingExecution.deviceId}`);
+            console.log(`${LOG}    Our device: ${myDeviceId}`);
+            console.log(`${LOG}    Started ${Math.round(executionAge/1000)}s ago`);
+            return; // Don't execute
+        }
+        
+        // Clear stale execution record
+        if (executionAge >= maxAge) {
+            console.log(`${LOG} 🧹 Clearing stale execution record for "${scheduleName}"`);
+            await chrome.storage.local.remove([executionKey]);
+        }
+    }
+    
+    // Claim this schedule execution
+    await chrome.storage.local.set({
+        [executionKey]: {
+            deviceId: myDeviceId,
+            scheduleName: scheduleName,
+            startedAt: Date.now()
+        }
+    });
+    
+    console.log(`${LOG} ✅ Device ${myDeviceId} claimed schedule: ${scheduleName}`);
+    // ============================================================
+    
     // Ensure Google OAuth token is fresh before starting (prevents mid-scrape re-auth)
     try {
         await ensureFreshToken();
@@ -494,6 +557,8 @@ async function executeScheduledRun(schedule) {
             `Cannot start scheduled run: Google authentication required. ${e.message}`,
             schedule.sourceName
         ).catch(() => {});
+        // Clear the execution claim if we're not proceeding
+        await chrome.storage.local.remove([executionKey]);
         throw new Error(`Google authentication required: ${e.message}`);
     }
     
@@ -634,6 +699,10 @@ async function executeScheduledRun(schedule) {
         
         await notifyScheduleFailed(schedule.sourceName, error);
     } finally {
+        // Clear execution record when done
+        await chrome.storage.local.remove([executionKey]);
+        console.log(`${LOG} 🏁 Device ${myDeviceId} completed schedule: ${scheduleName}`);
+        
         // Clear keep-alive
         chrome.alarms.clear(ALARM_NAMES.AUTO_RUN_KEEPALIVE);
         
@@ -974,9 +1043,41 @@ async function processAutoRunQueue() {
 async function processManualScrape() {
     console.log(`${LOG} Starting manual scrape processor`);
     
+    // Get our device ID first
+    const myDeviceId = await getDeviceId();
+    console.log(`${LOG} 📱 This device: ${myDeviceId}`);
+    
     const stored = await getFromStorage(['manualScrapeState', STORAGE_KEYS.SOURCE_MAPPING]);
     let state = stored.manualScrapeState;
     const sourceMapping = stored[STORAGE_KEYS.SOURCE_MAPPING] || {};
+    
+    // ============================================================
+    // DEVICE ISOLATION CHECK - Only process our own scrapes
+    // ============================================================
+    if (state) {
+        const scrapeOwner = state.initiatedByDevice;
+        
+        if (scrapeOwner && scrapeOwner !== myDeviceId) {
+            // This scrape belongs to another device - ignore it completely
+            console.log(`${LOG} ⏭️ Ignoring scrape - belongs to device: ${scrapeOwner}`);
+            console.log(`${LOG}    Our device ID: ${myDeviceId}`);
+            console.log(`${LOG}    Scrape target: ${state.sourceName}`);
+            console.log(`${LOG}    This is normal in multi-device setups`);
+            return; // Exit without processing
+        }
+        
+        // Tag legacy scrapes (started before this fix) with our device
+        if (!scrapeOwner) {
+            console.log(`${LOG} 🏷️ Tagging unowned scrape with our device: ${myDeviceId}`);
+            state.initiatedByDevice = myDeviceId;
+            await saveToStorage({ manualScrapeState: state });
+        }
+        
+        if (scrapeOwner === myDeviceId || !scrapeOwner) {
+            console.log(`${LOG} ✅ Processing our scrape for: ${state.sourceName}`);
+        }
+    }
+    // ============================================================
     
     if (!state?.isRunning) {
         console.log(`${LOG} Manual scrape not active`);
@@ -1328,6 +1429,26 @@ async function processManualScrape() {
         totalProfiles: totalProfilesScraped,
         totalPages: searches.length
     }).catch(() => {});
+    
+    // === Device isolation cleanup ===
+    const myDeviceId = await getDeviceId();
+    console.log(`${LOG} 🏁 Manual scrape completed on device: ${myDeviceId}`);
+    
+    // Log final state
+    const finalState = await getFromStorage(['manualScrapeState']);
+    if (finalState.manualScrapeState) {
+        console.log(`${LOG}    Source: ${finalState.manualScrapeState.sourceName}`);
+        console.log(`${LOG}    Total Profiles: ${finalState.manualScrapeState.totalProfiles || 0}`);
+        console.log(`${LOG}    Searches Completed: ${searches.length}`);
+        console.log(`${LOG}    Device: ${finalState.manualScrapeState.initiatedByDevice}`);
+    }
+    
+    // Clear any schedule execution claims for this source
+    if (sourceName) {
+        const executionKey = `scheduleExecution_${sourceName.replace(/\s+/g, '_')}`;
+        await chrome.storage.local.remove([executionKey]);
+    }
+    // === END Device isolation cleanup ===
 }
 
 /**
@@ -1564,6 +1685,69 @@ chrome.action.onClicked.addListener(async (tab) => {
 });
 
 // ============================================================
+// DEVICE DIAGNOSTICS
+// ============================================================
+
+/**
+ * Log comprehensive device and scrape diagnostics
+ * Can be called from console or via message
+ */
+async function logDeviceDiagnostics() {
+    const myDeviceId = await getDeviceId();
+    const deviceInfo = getDeviceInfo();
+    
+    console.log('\n' + '='.repeat(60));
+    console.log('[DIAGNOSTICS] 📊 Device & Scrape Status');
+    console.log('='.repeat(60));
+    
+    // Device info
+    console.log(`[DIAGNOSTICS] 📱 This Device: ${myDeviceId}`);
+    console.log(`[DIAGNOSTICS]    Platform: ${deviceInfo.platform}`);
+    console.log(`[DIAGNOSTICS]    Time: ${new Date().toLocaleString()}`);
+    
+    // Manual scrape state
+    const { manualScrapeState } = await chrome.storage.local.get(['manualScrapeState']);
+    if (manualScrapeState) {
+        console.log(`[DIAGNOSTICS] 📋 Manual Scrape State:`);
+        console.log(`[DIAGNOSTICS]    isRunning: ${manualScrapeState.isRunning}`);
+        console.log(`[DIAGNOSTICS]    sourceName: ${manualScrapeState.sourceName || 'N/A'}`);
+        console.log(`[DIAGNOSTICS]    initiatedByDevice: ${manualScrapeState.initiatedByDevice || 'NOT SET'}`);
+        console.log(`[DIAGNOSTICS]    currentSearchIndex: ${manualScrapeState.currentSearchIndex || 0}`);
+        console.log(`[DIAGNOSTICS]    isOurs: ${manualScrapeState.initiatedByDevice === myDeviceId ? 'YES ✅' : 'NO ⏭️'}`);
+    } else {
+        console.log(`[DIAGNOSTICS] 📋 Manual Scrape State: None`);
+    }
+    
+    // Schedule executions
+    const allStorage = await chrome.storage.local.get(null);
+    const scheduleExecutions = Object.entries(allStorage)
+        .filter(([key]) => key.startsWith('scheduleExecution_'));
+    
+    if (scheduleExecutions.length > 0) {
+        console.log(`[DIAGNOSTICS] 📅 Active Schedule Executions:`);
+        for (const [key, value] of scheduleExecutions) {
+            const age = Math.round((Date.now() - value.startedAt) / 1000);
+            const isOurs = value.deviceId === myDeviceId;
+            console.log(`[DIAGNOSTICS]    ${value.scheduleName}: device=${value.deviceId} (${age}s ago) ${isOurs ? '✅ OURS' : '⏭️ OTHER'}`);
+        }
+    } else {
+        console.log(`[DIAGNOSTICS] 📅 Active Schedule Executions: None`);
+    }
+    
+    console.log('='.repeat(60) + '\n');
+    
+    return {
+        deviceId: myDeviceId,
+        platform: deviceInfo.platform,
+        manualScrapeState,
+        scheduleExecutions: Object.fromEntries(scheduleExecutions)
+    };
+}
+
+// Make available globally for console debugging
+globalThis.logDeviceDiagnostics = logDeviceDiagnostics;
+
+// ============================================================
 // MESSAGE HANDLER
 // ============================================================
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -1683,6 +1867,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         currentTabName
                     };
                     break;
+                
+                case 'GET_DEVICE_DIAGNOSTICS':
+                    logDeviceDiagnostics().then(diagnostics => {
+                        sendResponse(diagnostics);
+                    });
+                    return true; // Keep channel open for async response
                 
                 // --- SHEETS ---
                 case MESSAGE_ACTIONS.LOAD_INPUT_SHEET: {
@@ -2086,6 +2276,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 // --- MANUAL SCRAPE ---
                 case MESSAGE_ACTIONS.START_MANUAL_SCRAPE: {
                     const { sourceName, searches } = message;
+                    
+                    // ============================================================
+                    // DEVICE ISOLATION CHECK - Before creating state
+                    // ============================================================
+                    const myDeviceId = await getDeviceId();
+                    const existingState = await getFromStorage(['manualScrapeState']);
+                    
+                    // Check if there's an existing scrape owned by another device
+                    if (existingState.manualScrapeState?.initiatedByDevice && 
+                        existingState.manualScrapeState.initiatedByDevice !== myDeviceId) {
+                        console.log(`${LOG} ⏭️ Ignoring START_MANUAL_SCRAPE - belongs to ${existingState.manualScrapeState.initiatedByDevice}`);
+                        console.log(`${LOG}    Our device: ${myDeviceId}`);
+                        console.log(`${LOG}    Scrape: ${existingState.manualScrapeState.sourceName}`);
+                        response = { success: false, error: 'Scrape belongs to another device' };
+                        break; // Don't create new state
+                    }
+                    
+                    console.log(`${LOG} ✅ Processing START_MANUAL_SCRAPE for device: ${myDeviceId}`);
+                    // ============================================================
+                    
                     const { sourceMapping } = await getFromStorage([STORAGE_KEYS.SOURCE_MAPPING]);
                     const workbookId = sourceMapping?.[sourceName];
                     
@@ -2101,6 +2311,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         totalSearches: searches.length
                     });
                     
+                    // Get device ID before creating state
+                    const deviceId = await getDeviceId();
+                    console.log(`${LOG} 🚀 Initiating manual scrape on device: ${deviceId}`);
+                    
                     manualScrapeState = {
                         isRunning: true,
                         isAborted: false,
@@ -2109,10 +2323,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         currentSearchIndex: 0,
                         workbookId,
                         executionId: execution.id,
-                        totalProfiles: 0
+                        totalProfiles: 0,
+                        initiatedByDevice: deviceId,  // Device isolation tag
+                        initiatedAt: Date.now()       // Timestamp for debugging
                     };
                     
                     await saveToStorage({ manualScrapeState });
+                    console.log(`${LOG} ✅ Scrape state saved with device tag: ${deviceId}`);
                     startKeepAlive();
                     
                     processManualScrape().catch(e => {
