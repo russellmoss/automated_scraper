@@ -5,7 +5,7 @@
     'use strict';
 
     // Bump this when debugging “which script is actually running” in Chrome
-    const SCRIPT_VERSION = '2025-12-17-testmode-v1';
+    const SCRIPT_VERSION = '2025-01-15-linkedin-dom-update-v1';
 
     // ============================================================
     // CONFIG
@@ -21,23 +21,28 @@
     };
 
     // ============================================================
-    // SELECTORS (Updated based on diagnostic - January 2025)
+    // SELECTORS (Updated for LinkedIn January 2025 DOM changes)
     // ============================================================
     const SELECTORS = {
-        // Primary selector for profile name links
-        NAME_LINK: 'a[data-view-name="search-result-lockup-title"]',
-        // Fallback selectors for different LinkedIn page layouts
-        NAME_LINK_FALLBACK_1: 'a[href*="/in/"][href*="linkedin.com"]',
-        NAME_LINK_FALLBACK_2: 'li.reusable-search__result-container a[href*="/in/"]',
-        NAME_LINK_FALLBACK_3: 'div[class*="entity-result"] a[href*="/in/"]',
-        // OLD selectors still work (acd09c55 for title, bb0216de for location)
-        TITLE_PRIMARY: 'div.acd09c55 > p',  // Working
-        TITLE_FALLBACK_1: 'div[data-view-name="people-search-result"] div.d395caa1:not(.a7293f27) > p',
-        TITLE_FALLBACK_2: 'div[data-view-name="people-search-result"] div.d395caa1:first-of-type > p',
-        LOCATION_PRIMARY: 'div.bb0216de > p',  // Working
-        LOCATION_FALLBACK_1: 'div[data-view-name="people-search-result"] div.d395caa1.a7293f27 > p',
-        LOCATION_FALLBACK_2: 'div[data-view-name="people-search-result"] div.d395caa1:nth-of-type(2) > p',
-        NEXT_BUTTON: 'button[data-testid="pagination-controls-next-button-visible"]'
+        // Container - find result items
+        RESULT_ITEM: 'li',  // Each result is in an <li>
+        RESULT_ITEM_INNER: 'div[data-view-name="search-entity-result-universal-template"]',
+        
+        // Name/Profile Link
+        NAME_LINK: 'a[href*="/in/"][data-test-app-aware-link]',
+        NAME_TEXT: 'span[dir="ltr"] > span[aria-hidden="true"]',
+        NAME_FALLBACK: 'img[alt]',  // Alt attribute of profile photo
+        
+        // Title - has t-black class
+        TITLE_PRIMARY: 'div.t-14.t-black.t-normal',
+        TITLE_FALLBACK: 'div[class*="t-14"][class*="t-black"]',
+        
+        // Location - has t-14 t-normal but NOT t-black
+        LOCATION_PRIMARY: 'div.t-14.t-normal:not(.t-black)',
+        LOCATION_FALLBACK: 'div[class*="t-14"]:not([class*="t-black"])',
+        
+        // Pagination
+        NEXT_BUTTON: 'button[aria-label="Next"]'
     };
 
     // ============================================================
@@ -146,14 +151,49 @@
     }
 
     function sendMessageSafe(message, callback) {
-        chrome.runtime.sendMessage(message, (response) => {
-            if (chrome.runtime.lastError) {
-                console.warn('[CS] Message error:', chrome.runtime.lastError.message);
-                if (callback) callback(null);
+        // Check if extension context is still valid
+        if (!chrome.runtime?.id) {
+            console.warn('[CS] ⚠️ Extension context invalidated - cannot send message');
+            if (callback) callback(null);
+            return;
+        }
+        
+        try {
+            chrome.runtime.sendMessage(message, (response) => {
+                if (chrome.runtime.lastError) {
+                    const errorMsg = chrome.runtime.lastError.message || '';
+                    
+                    // Handle extension context invalidated error gracefully
+                    if (errorMsg.includes('Extension context invalidated') || 
+                        errorMsg.includes('message port closed') ||
+                        errorMsg.includes('Receiving end does not exist')) {
+                        console.warn('[CS] ⚠️ Extension context invalidated - extension may have been reloaded');
+                        console.warn('[CS] This is normal when the extension is reloaded during an active scrape');
+                        // Reset scraping state since extension context is gone
+                        isScrapingActive = false;
+                        stopRequested = false;
+                        removeStopButton();
+                    } else {
+                        console.warn('[CS] Message error:', errorMsg);
+                    }
+                    if (callback) callback(null);
+                } else {
+                    if (callback) callback(response);
+                }
+            });
+        } catch (error) {
+            // Handle errors when trying to send message
+            if (error.message?.includes('Extension context invalidated') || 
+                error.message?.includes('message port closed')) {
+                console.warn('[CS] ⚠️ Extension context invalidated - cannot send message');
+                isScrapingActive = false;
+                stopRequested = false;
+                removeStopButton();
             } else {
-                if (callback) callback(response);
+                console.error('[CS] Error sending message:', error);
             }
-        });
+            if (callback) callback(null);
+        }
     }
 
     // ============================================================
@@ -257,117 +297,92 @@
     // ============================================================
     function findProfileCards() {
         const cards = [];
-        const seenUrls = new Set(); // Track seen profile URLs to avoid duplicates
-        // Try primary selector first
-        let nameLinks = Array.from(document.querySelectorAll(SELECTORS.NAME_LINK));
+        const seenUrls = new Set();
         
-        // If no results, try fallback selectors
-        if (nameLinks.length === 0) {
-            console.log('[CS] Primary selector found 0 links, trying fallbacks...');
-            nameLinks = Array.from(document.querySelectorAll(SELECTORS.NAME_LINK_FALLBACK_1));
-            
-            if (nameLinks.length === 0) {
-                nameLinks = Array.from(document.querySelectorAll(SELECTORS.NAME_LINK_FALLBACK_2));
-            }
-            if (nameLinks.length === 0) {
-                nameLinks = Array.from(document.querySelectorAll(SELECTORS.NAME_LINK_FALLBACK_3));
-            }
-            
-            // Filter to only profile links (must contain /in/)
-            nameLinks = nameLinks.filter(link => {
-                const url = link.href?.split('?')[0] || '';
-                return url.includes('/in/') && !url.includes('/search/');
-            });
-            
-            console.log(`[CS] Fallback selectors found ${nameLinks.length} profile links`);
-        }
+        // Find all <li> elements that are ACTUAL search results
+        // Key: look for li elements that contain the result template
+        const resultItems = document.querySelectorAll('li');
         
-        // Additional fallback: find all links with /in/ in search results
-        if (nameLinks.length === 0) {
-            console.log('[CS] Trying broad search for profile links...');
-            const allLinks = Array.from(document.querySelectorAll('a[href*="/in/"]'));
-            nameLinks = allLinks.filter(link => {
-                const url = link.href?.split('?')[0] || '';
-                // Must be a profile link, not a search result page link
-                const isProfileLink = url.includes('/in/') && 
-                                    !url.includes('/search/') && 
-                                    !url.includes('/feed/') &&
-                                    !url.includes('/messaging/');
-                // Must be in a search result container
-                const inSearchResult = link.closest('li.reusable-search__result-container') ||
-                                      link.closest('div[class*="entity-result"]') ||
-                                      link.closest('li[class*="result"]');
-                return isProfileLink && inSearchResult;
-            });
-            console.log(`[CS] Broad search found ${nameLinks.length} profile links in search results`);
-        }
-        
-        nameLinks.forEach(nameLink => {
-            // Get URL first to check for duplicates
-            const url = nameLink.href?.split('?')[0] || '';
-            if (!url || !url.includes('/in/')) {
-                return; // Skip invalid links
+        resultItems.forEach(li => {
+            // FILTER 1: Must have the search result template marker
+            // This excludes "mutual connections", sidebar items, etc.
+            const hasResultTemplate = li.querySelector('[data-view-name="search-entity-result-universal-template"]') ||
+                                      li.querySelector('div.linked-area') ||
+                                      li.className.includes('reusable-search');
+            
+            if (!hasResultTemplate) {
+                // Check if it at least has the expected structure
+                const hasExpectedStructure = li.querySelector('div.mb1') && 
+                                             li.querySelector('div.t-14');
+                if (!hasExpectedStructure) return;
             }
             
-            // Skip duplicates
-            if (seenUrls.has(url)) {
-                return;
-            }
+            // FILTER 2: Must contain a profile link with data-test attribute
+            const profileLink = li.querySelector('a[href*="/in/"][data-test-app-aware-link]');
+            if (!profileLink) return;
+            
+            // FILTER 3: Must NOT be inside a "mutual connections" or insights section
+            const isInInsights = li.querySelector('.entity-result__insights')?.contains(profileLink) ||
+                                profileLink.closest('.entity-result__insights') ||
+                                profileLink.closest('[class*="insight"]') ||
+                                profileLink.closest('[class*="mutual"]');
+            if (isInInsights) return;
+            
+            // FILTER 4: The profile link should be in the main content area, not in secondary text
+            const isInButton = profileLink.closest('button, [role="button"], .artdeco-button');
+            if (isInButton) return;
+            
+            // Get URL and check for duplicates
+            const url = profileLink.href?.split('?')[0] || '';
+            if (!url.includes('/in/') || seenUrls.has(url)) return;
             seenUrls.add(url);
             
-            // Find card container - try multiple methods since data-view-name may not work
-            let card = nameLink.closest('li.reusable-search__result-container') ||
-                       nameLink.closest('div[class*="entity-result"]') ||
-                       nameLink.closest('li') ||
-                       findCardContainer(nameLink);
+            // Get name from the correct location (not from img alt which might be wrong)
+            let nameText = '';
             
-            // If still no card found, use parent that contains title/location
-            if (!card) {
-                card = findCardContainer(nameLink);
+            // Try the name span first (most reliable)
+            const nameSpan = li.querySelector('span[dir="ltr"] > span[aria-hidden="true"]');
+            if (nameSpan) {
+                nameText = nameSpan.innerText?.trim() || '';
             }
             
-            if (card) {
-                const nameText = nameLink.innerText?.trim() || nameLink.textContent?.trim() || '';
-                if (nameText && nameText.length > 0) { // Only add if we have a name
-                    cards.push({
-                        card,
-                        nameLink,
-                        nameText
-                    });
-                }
+            // Fallback: img alt (but only if it's the main profile image)
+            if (!nameText) {
+                const img = li.querySelector('.presence-entity__image[alt], img.EntityPhoto-circle-3[alt]');
+                if (img) nameText = img.alt?.trim() || '';
             }
+            
+            // FILTER 5: Validate the name looks like a real name
+            // Skip if name is empty, too short, or looks like UI text
+            if (!nameText || nameText.length < 3) return;
+            if (/^(connect|message|follow|view|see\s)/i.test(nameText)) return;
+            if (/mutual|connection|degree/i.test(nameText)) return;
+            
+            // FILTER 6: Must have title or location to be a valid card
+            const hasTitle = li.querySelector('div.t-14.t-black.t-normal');
+            const hasLocation = li.querySelector('div.t-14.t-normal:not(.t-black)');
+            
+            if (!hasTitle && !hasLocation) {
+                // This is likely not a proper search result card
+                console.log(`[CS] Skipping "${nameText}" - no title/location divs found`);
+                return;
+            }
+            
+            cards.push({
+                card: li,
+                nameLink: profileLink,
+                nameText: nameText
+            });
         });
         
-        if (cards.length === 0 && nameLinks.length > 0) {
-            console.warn(`[CS] Found ${nameLinks.length} profile links but 0 valid cards - may need to wait for page to load`);
-        }
-        
+        console.log(`[CS] Found ${cards.length} valid profile cards`);
         return cards;
     }
 
     function findCardContainer(nameLink) {
-        let current = nameLink.parentElement;
-        let depth = 0;
-        const maxDepth = 10;
-        
-        while (current && depth < maxDepth) {
-            // Use working selectors (acd09c55 for title, bb0216de for location)
-            const hasTitle = current.querySelector('div.acd09c55 > p') ||
-                             current.querySelector('div.d395caa1:not(.a7293f27) > p');
-            const hasLocation = current.querySelector('div.bb0216de > p') ||
-                                current.querySelector('div.d395caa1.a7293f27 > p');
-            
-            if (hasTitle || hasLocation) {
-                return current;
-            }
-            
-            current = current.parentElement;
-            depth++;
-        }
-        
-        // Last resort: go up 6 levels from name link
-        current = nameLink;
-        for (let i = 0; i < 6 && current.parentElement; i++) {
+        // Walk up to find the <li> element
+        let current = nameLink;
+        while (current && current.tagName !== 'LI') {
             current = current.parentElement;
         }
         return current;
@@ -381,8 +396,10 @@
         
         const locationPatterns = [
             /\b(?:Area|Metropolitan|County|Region)\s*$/i,
-            /^[A-Z][a-z]+,\s*[A-Z]{2}$/,
-            /\b(?:United States|USA|Greater|Bay Area)\b/i
+            /^[A-Z][a-z]+,\s*[A-Z]{2}$/,  // "City, ST" format
+            /\b(?:United States|USA|Greater|Bay Area)\b/i,
+            /,\s*[A-Z]{2}$/,  // Ends with ", TX" etc.
+            /\b(?:New York|Los Angeles|Chicago|Houston|Phoenix|Philadelphia|San Antonio|San Diego|Dallas|San Jose)\b/i
         ];
         
         return locationPatterns.some(p => p.test(text));
@@ -411,7 +428,8 @@
         const nameLinkRect = nameLink.getBoundingClientRect();
         const nameText = nameLink.innerText.trim().toLowerCase();
 
-        const candidates = card.querySelectorAll('p, div > p, div.d395caa1 > p');
+        // Updated to look for div elements with utility classes instead of p tags
+        const candidates = card.querySelectorAll('div.t-14.t-black.t-normal, div.t-14.t-normal:not(.t-black)');
         
         candidates.forEach((el) => {
             const text = el.innerText?.trim();
@@ -491,32 +509,55 @@
     }
 
     // ============================================================
-    // LAYER 2: DIRECT P-TAG EXTRACTION
+    // LAYER 2: DIRECT TEXT EXTRACTION (Updated for div-based structure)
     // ============================================================
-    function directPTagExtraction(card, nameLink) {
-        const allPTags = Array.from(card.querySelectorAll('p'));
+    function directTextExtraction(card, nameLink) {
+        // LinkedIn no longer uses <p> tags - use <div> with utility classes
+        const { title, location } = extractTitleAndLocation(card);
+        return { title, location };
+    }
+    
+    // ============================================================
+    // TITLE AND LOCATION EXTRACTION
+    // ============================================================
+    function extractTitleAndLocation(card) {
+        let title = '';
+        let location = '';
         
-        const dataPTags = allPTags.filter(p => {
-            if (p.contains(nameLink) || nameLink.contains(p)) return false;
-            
-            const text = p.innerText?.trim() || '';
-            
-            if (text.includes('mutual connection')) return false;
-            if (text.includes('other mutual')) return false;
-            if (/^•\s*(1st|2nd|3rd)/i.test(text)) return false;
-            if (text.includes('• 1st') || text.includes('• 2nd') || text.includes('• 3rd')) return false;
-            if (text.toLowerCase().includes('connect')) return false;
-            if (text.toLowerCase().includes('message')) return false;
-            if (text.toLowerCase().includes('follow')) return false;
-            if (text.length < 3 || text.length > 200) return false;
-            
-            return true;
+        // Find the text container (usually has class "mb1")
+        const textContainer = card.querySelector('div.mb1') || card;
+        
+        // Title: div with t-14, t-black, t-normal
+        const titleEl = textContainer.querySelector('div.t-14.t-black.t-normal');
+        if (titleEl) {
+            title = titleEl.innerText?.trim() || '';
+        }
+        
+        // Location: div with t-14, t-normal but NOT t-black
+        // It's usually the sibling after title
+        const allDivs = textContainer.querySelectorAll('div.t-14.t-normal');
+        allDivs.forEach(div => {
+            if (!div.classList.contains('t-black')) {
+                const text = div.innerText?.trim() || '';
+                // Validate it looks like a location
+                if (text && !location && looksLikeLocation(text)) {
+                    location = text;
+                }
+            }
         });
         
-        return {
-            title: dataPTags[0]?.innerText?.trim() || '',
-            location: dataPTags[1]?.innerText?.trim() || ''
-        };
+        // Fallback: if no location found, get second t-14 div
+        if (!location) {
+            const t14Divs = textContainer.querySelectorAll('div[class*="t-14"]');
+            if (t14Divs.length >= 2) {
+                const secondDiv = t14Divs[1];
+                if (!secondDiv.classList.contains('t-black')) {
+                    location = secondDiv.innerText?.trim() || '';
+                }
+            }
+        }
+        
+        return { title, location };
     }
 
     // ============================================================
@@ -557,44 +598,44 @@
             location = structureResult.location;
             extractionMethod = structureResult.method;
         } else {
-            // LAYER 1: Class-based selectors
-            const titleElPrimary = card.querySelector(SELECTORS.TITLE_PRIMARY);
-            const locationElPrimary = card.querySelector(SELECTORS.LOCATION_PRIMARY);
+            // LAYER 1: New div-based extraction using utility classes
+            const titleAndLocation = extractTitleAndLocation(card);
+            title = titleAndLocation.title;
+            location = titleAndLocation.location;
             
-            if (titleElPrimary) title = titleElPrimary.innerText?.trim() || '';
-            if (locationElPrimary) location = locationElPrimary.innerText?.trim() || '';
-            
+            // Fallback to primary selectors if extractionTitleAndLocation didn't work
             if (!title) {
-                const titleElFallback1 = card.querySelector(SELECTORS.TITLE_FALLBACK_1);
-                if (titleElFallback1) title = titleElFallback1.innerText?.trim() || '';
+                const titleElPrimary = card.querySelector(SELECTORS.TITLE_PRIMARY);
+                if (titleElPrimary) title = titleElPrimary.innerText?.trim() || '';
             }
             if (!location) {
-                const locationElFallback1 = card.querySelector(SELECTORS.LOCATION_FALLBACK_1);
-                if (locationElFallback1) location = locationElFallback1.innerText?.trim() || '';
+                const locationElPrimary = card.querySelector(SELECTORS.LOCATION_PRIMARY);
+                if (locationElPrimary) location = locationElPrimary.innerText?.trim() || '';
             }
             
+            // Additional fallbacks
             if (!title) {
-                const titleElOld = card.querySelector(SELECTORS.TITLE_FALLBACK_2);
-                if (titleElOld) title = titleElOld.innerText?.trim() || '';
+                const titleElFallback = card.querySelector(SELECTORS.TITLE_FALLBACK);
+                if (titleElFallback) title = titleElFallback.innerText?.trim() || '';
             }
             if (!location) {
-                const locationElOld = card.querySelector(SELECTORS.LOCATION_FALLBACK_2);
-                if (locationElOld) location = locationElOld.innerText?.trim() || '';
+                const locationElFallback = card.querySelector(SELECTORS.LOCATION_FALLBACK);
+                if (locationElFallback) location = locationElFallback.innerText?.trim() || '';
             }
             
             extractionMethod = (title || location) ? 'class-selectors' : 'none';
         }
         
-        // LAYER 2: Direct p-tag extraction fallback
+        // LAYER 2: Direct text extraction fallback
         if (!title || !location) {
-            const fallback = directPTagExtraction(card, nameLink);
+            const fallback = directTextExtraction(card, nameLink);
             if (!title && fallback.title) {
                 title = fallback.title;
-                extractionMethod = extractionMethod === 'none' ? 'direct-p-tag' : extractionMethod + '+direct-p-tag';
+                extractionMethod = extractionMethod === 'none' ? 'direct-text' : extractionMethod + '+direct-text';
             }
             if (!location && fallback.location) {
                 location = fallback.location;
-                extractionMethod = extractionMethod === 'none' ? 'direct-p-tag' : extractionMethod + '+direct-p-tag';
+                extractionMethod = extractionMethod === 'none' ? 'direct-text' : extractionMethod + '+direct-text';
             }
         }
         
@@ -655,8 +696,8 @@
             }
             
             // If count hasn't changed for several checks, page might be done loading
-            // But still wait a bit more in case it's a slow-loading page
-            if (noChangeCount >= 4 && currentCount > 0) {
+            // But still wait a bit more in case it's a slow-loading page (increased for Pi)
+            if (noChangeCount >= 6 && currentCount > 0) {
                 console.log(`[CS] Card count stable at ${currentCount} - page likely done loading`);
                 return currentCount >= expected;
             }
@@ -681,6 +722,9 @@
             window.scrollTo(0, document.body.scrollHeight);
             await wait(1000);
         }
+        
+        // Extra wait for slower machines (like Pi) - let page settle
+        await wait(2000);
         
         const cards = findProfileCards();
         console.log(`[CS] Found ${cards.length} profile cards on page`);
@@ -836,9 +880,20 @@
             // Notify service worker to stop auto-run (for scheduled scrapes)
             // This ensures the scheduled scrape is properly aborted
             try {
+                // Check if extension context is still valid
+                if (!chrome.runtime?.id) {
+                    console.warn('[CS] ⚠️ Extension context invalidated - cannot send STOP_AUTO_RUN');
+                    return;
+                }
                 await chrome.runtime.sendMessage({ action: 'STOP_AUTO_RUN' });
             } catch (e) {
-                console.warn('[CS] Failed to send STOP_AUTO_RUN message:', e);
+                const errorMsg = e?.message || String(e) || '';
+                if (errorMsg.includes('Extension context invalidated') || 
+                    errorMsg.includes('message port closed')) {
+                    console.warn('[CS] ⚠️ Extension context invalidated - cannot send STOP_AUTO_RUN');
+                } else {
+                    console.warn('[CS] Failed to send STOP_AUTO_RUN message:', e);
+                }
             }
             
             // Also send STOP_SCRAPING to ensure content script stops
@@ -963,36 +1018,48 @@
         });
             
         } catch (error) {
-            console.error('[CS] ❌ Scraping error:', error);
+            const errorMessage = error?.message || String(error) || 'Unknown error';
+            const isContextInvalidated = errorMessage.includes('Extension context invalidated') ||
+                                        errorMessage.includes('message port closed') ||
+                                        errorMessage.includes('Receiving end does not exist');
             
-            // Send detailed error notification
-            const searchUrl = window.location.href;
-            const searchName = document.title || searchUrl;
-            sendMessageSafe({
-                action: 'SCRAPE_ERROR',
-                personName: 'Scraping Process',
-                searchName: searchName,
-                failureType: error.name === 'TimeoutError' ? 'timeout_error' : 
-                            error.message?.includes('selector') ? 'selector_error' :
-                            error.message?.includes('network') ? 'network_error' : 'scraping_error',
-                error: error.message || String(error),
-                errorDetails: {
-                    stack: error.stack,
-                    url: searchUrl,
-                    sourceName: sourceName,
-                    totalProfiles,
-                    totalPages,
-                    timestamp: new Date().toISOString()
-                }
-            });
-            
-            sendMessageSafe({
-                action: 'SCRAPING_COMPLETE',
-                totalProfiles: totalProfiles,
-                totalPages: totalPages,
-                error: error.message
-            });
+            if (isContextInvalidated) {
+                console.warn('[CS] ⚠️ Extension context invalidated - extension was reloaded during scrape');
+                console.warn('[CS] This is normal when the extension is reloaded. Scraping will stop.');
+                // Don't try to send messages if context is invalidated
+            } else {
+                console.error('[CS] ❌ Scraping error:', error);
+                
+                // Send detailed error notification (only if context is still valid)
+                const searchUrl = window.location.href;
+                const searchName = document.title || searchUrl;
+                sendMessageSafe({
+                    action: 'SCRAPE_ERROR',
+                    personName: 'Scraping Process',
+                    searchName: searchName,
+                    failureType: error.name === 'TimeoutError' ? 'timeout_error' : 
+                                error.message?.includes('selector') ? 'selector_error' :
+                                error.message?.includes('network') ? 'network_error' : 'scraping_error',
+                    error: errorMessage,
+                    errorDetails: {
+                        stack: error.stack,
+                        url: searchUrl,
+                        sourceName: sourceName,
+                        totalProfiles,
+                        totalPages,
+                        timestamp: new Date().toISOString()
+                    }
+                });
+                
+                sendMessageSafe({
+                    action: 'SCRAPING_COMPLETE',
+                    totalProfiles: totalProfiles,
+                    totalPages: totalPages,
+                    error: errorMessage
+                });
+            }
         } finally {
+            // Always reset state, even if extension context is invalidated
             isScrapingActive = false;
             removeStopButton();
             stopRequested = false;
@@ -1003,6 +1070,13 @@
     // MESSAGE LISTENER
     // ============================================================
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+        // Check if extension context is still valid
+        if (!chrome.runtime?.id) {
+            console.warn('[CS] ⚠️ Extension context invalidated - cannot process message');
+            sendResponse({ success: false, error: 'Extension context invalidated' });
+            return false;
+        }
+        
         const { action } = message;
         
         console.log(`[CS] 📩 Received: ${action}`);
@@ -1011,7 +1085,16 @@
             case 'START_SCRAPING':
                 const sourceName = message.sourceName || 'Unknown';
                 startScraping(sourceName, message.maxPages).catch(error => {
-                    console.error('[CS] Start scraping error:', error);
+                    const errorMessage = error?.message || String(error) || 'Unknown error';
+                    const isContextInvalidated = errorMessage.includes('Extension context invalidated') ||
+                                                errorMessage.includes('message port closed');
+                    
+                    if (isContextInvalidated) {
+                        console.warn('[CS] ⚠️ Extension context invalidated when starting scrape');
+                        console.warn('[CS] Extension may have been reloaded. Please reload the page and try again.');
+                    } else {
+                        console.error('[CS] Start scraping error:', error);
+                    }
                 });
                 sendResponse({ success: true });
                 return true;
@@ -1046,9 +1129,142 @@
     });
 
     // ============================================================
+    // DIAGNOSTIC FUNCTION (exposed to console for debugging)
+    // ============================================================
+    /**
+     * Run diagnostic test on current page to see what profiles would pass filters
+     * Usage: In browser console, type: window.savvyPirateDiagnostic()
+     */
+    function runDiagnostic() {
+        console.log('🔍 Savvy Pirate Diagnostic Test');
+        console.log('================================\n');
+        
+        const resultItems = document.querySelectorAll('li');
+        let validCount = 0;
+        let skippedReasons = {};
+        
+        resultItems.forEach(li => {
+            const profileLink = li.querySelector('a[href*="/in/"][data-test-app-aware-link]');
+            if (!profileLink) return;
+            
+            const nameSpan = li.querySelector('span[dir="ltr"] > span[aria-hidden="true"]');
+            const hasTitle = li.querySelector('div.t-14.t-black.t-normal');
+            const hasLocation = li.querySelector('div.t-14.t-normal:not(.t-black)');
+            const isInInsights = profileLink.closest('[class*="insight"]') || profileLink.closest('[class*="mutual"]');
+            const hasResultTemplate = li.querySelector('[data-view-name="search-entity-result-universal-template"]');
+            const hasExpectedStructure = li.querySelector('div.mb1') && li.querySelector('div.t-14');
+            
+            const name = nameSpan?.innerText?.trim() || profileLink.innerText?.trim() || '(no name)';
+            
+            if (!hasResultTemplate && !hasExpectedStructure) {
+                skippedReasons[name] = 'No result template or expected structure';
+                return;
+            }
+            if (isInInsights) {
+                skippedReasons[name] = 'In insights/mutual section';
+                return;
+            }
+            if (!hasTitle && !hasLocation) {
+                skippedReasons[name] = 'No title or location';
+                return;
+            }
+            
+            validCount++;
+            const titleText = hasTitle?.innerText?.trim().substring(0, 40) || '(no title)';
+            const locText = hasLocation?.innerText?.trim() || '(no location)';
+            console.log(`✅ ${name}: title="${titleText}", loc="${locText}"`);
+        });
+        
+        console.log(`\n📊 Summary:`);
+        console.log(`   Valid profiles: ${validCount}`);
+        console.log(`   Skipped: ${Object.keys(skippedReasons).length}`);
+        if (Object.keys(skippedReasons).length > 0) {
+            console.log(`\n❌ Skipped profiles:`);
+            Object.entries(skippedReasons).forEach(([name, reason]) => {
+                console.log(`   - ${name}: ${reason}`);
+            });
+        }
+        
+        return {
+            valid: validCount,
+            skipped: Object.keys(skippedReasons).length,
+            skippedReasons: skippedReasons
+        };
+    }
+    
+    // Expose diagnostic function to page's window context (not content script's isolated context)
+    // Inject a script into the page context to expose the function
+    const script = document.createElement('script');
+    script.textContent = `
+        (function() {
+            // Copy the diagnostic function logic into page context
+            window.savvyPirateDiagnostic = function() {
+                console.log('🔍 Savvy Pirate Diagnostic Test');
+                console.log('================================\\n');
+                
+                const resultItems = document.querySelectorAll('li');
+                let validCount = 0;
+                let skippedReasons = {};
+                
+                resultItems.forEach(li => {
+                    const profileLink = li.querySelector('a[href*="/in/"][data-test-app-aware-link]');
+                    if (!profileLink) return;
+                    
+                    const nameSpan = li.querySelector('span[dir="ltr"] > span[aria-hidden="true"]');
+                    const hasTitle = li.querySelector('div.t-14.t-black.t-normal');
+                    const hasLocation = li.querySelector('div.t-14.t-normal:not(.t-black)');
+                    const isInInsights = profileLink.closest('[class*="insight"]') || profileLink.closest('[class*="mutual"]');
+                    const hasResultTemplate = li.querySelector('[data-view-name="search-entity-result-universal-template"]');
+                    const hasExpectedStructure = li.querySelector('div.mb1') && li.querySelector('div.t-14');
+                    
+                    const name = nameSpan?.innerText?.trim() || profileLink.innerText?.trim() || '(no name)';
+                    
+                    if (!hasResultTemplate && !hasExpectedStructure) {
+                        skippedReasons[name] = 'No result template or expected structure';
+                        return;
+                    }
+                    if (isInInsights) {
+                        skippedReasons[name] = 'In insights/mutual section';
+                        return;
+                    }
+                    if (!hasTitle && !hasLocation) {
+                        skippedReasons[name] = 'No title or location';
+                        return;
+                    }
+                    
+                    validCount++;
+                    const titleText = hasTitle?.innerText?.trim().substring(0, 40) || '(no title)';
+                    const locText = hasLocation?.innerText?.trim() || '(no location)';
+                    console.log(\`✅ \${name}: title="\${titleText}", loc="\${locText}"\`);
+                });
+                
+                console.log(\`\\n📊 Summary:\`);
+                console.log(\`   Valid profiles: \${validCount}\`);
+                console.log(\`   Skipped: \${Object.keys(skippedReasons).length}\`);
+                if (Object.keys(skippedReasons).length > 0) {
+                    console.log(\`\\n❌ Skipped profiles:\`);
+                    Object.entries(skippedReasons).forEach(([name, reason]) => {
+                        console.log(\`   - \${name}: \${reason}\`);
+                    });
+                }
+                
+                return {
+                    valid: validCount,
+                    skipped: Object.keys(skippedReasons).length,
+                    skippedReasons: skippedReasons
+                };
+            };
+            console.log('💡 Savvy Pirate: Run window.savvyPirateDiagnostic() in console to test filtering logic');
+        })();
+    `;
+    (document.head || document.documentElement).appendChild(script);
+    script.remove(); // Remove script tag after injection
+
+    // ============================================================
     // INITIALIZATION
     // ============================================================
     console.log(`[CS] OK: Content script loaded (${SCRIPT_VERSION})`);
+    console.log(`[CS] 💡 Tip: Run window.savvyPirateDiagnostic() in console to test filtering logic`);
     
     // Auto-validate selectors on search pages
     if (window.location.href.includes('linkedin.com/search/results/people')) {

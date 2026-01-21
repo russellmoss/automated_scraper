@@ -1431,16 +1431,15 @@ async function processManualScrape() {
     }).catch(() => {});
     
     // === Device isolation cleanup ===
-    const myDeviceId = await getDeviceId();
+    // Reuse myDeviceId from the start of the function
     console.log(`${LOG} 🏁 Manual scrape completed on device: ${myDeviceId}`);
     
-    // Log final state
-    const finalState = await getFromStorage(['manualScrapeState']);
-    if (finalState.manualScrapeState) {
-        console.log(`${LOG}    Source: ${finalState.manualScrapeState.sourceName}`);
-        console.log(`${LOG}    Total Profiles: ${finalState.manualScrapeState.totalProfiles || 0}`);
+    // Log final state (reuse finalManualState from above)
+    if (finalManualState) {
+        console.log(`${LOG}    Source: ${finalManualState.sourceName}`);
+        console.log(`${LOG}    Total Profiles: ${finalManualState.totalProfiles || 0}`);
         console.log(`${LOG}    Searches Completed: ${searches.length}`);
-        console.log(`${LOG}    Device: ${finalState.manualScrapeState.initiatedByDevice}`);
+        console.log(`${LOG}    Device: ${finalManualState.initiatedByDevice}`);
     }
     
     // Clear any schedule execution claims for this source
