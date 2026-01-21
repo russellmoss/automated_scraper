@@ -1290,6 +1290,13 @@
                 sendResponse(authStatus);
                 return true;
             }
+            
+            case 'RUN_DIAGNOSTIC': {
+                // Allow diagnostic to be run via message from page console
+                const result = runDiagnostic();
+                sendResponse({ success: true, result: result });
+                return true;
+            }
                 
             default:
                 sendResponse({ success: false, error: 'Unknown action' });
@@ -1361,79 +1368,16 @@
         };
     }
     
-    // Expose diagnostic function to page's window context (not content script's isolated context)
-    // Inject a script into the page context to expose the function
-    const script = document.createElement('script');
-    script.textContent = `
-        (function() {
-            // Copy the diagnostic function logic into page context
-            window.savvyPirateDiagnostic = function() {
-                console.log('🔍 Savvy Pirate Diagnostic Test');
-                console.log('================================\\n');
-                
-                const resultItems = document.querySelectorAll('li');
-                let validCount = 0;
-                let skippedReasons = {};
-                
-                resultItems.forEach(li => {
-                    const profileLink = li.querySelector('a[href*="/in/"][data-test-app-aware-link]');
-                    if (!profileLink) return;
-                    
-                    const nameSpan = li.querySelector('span[dir="ltr"] > span[aria-hidden="true"]');
-                    const hasTitle = li.querySelector('div.t-14.t-black.t-normal');
-                    const hasLocation = li.querySelector('div.t-14.t-normal:not(.t-black)');
-                    const isInInsights = profileLink.closest('[class*="insight"]') || profileLink.closest('[class*="mutual"]');
-                    const hasResultTemplate = li.querySelector('[data-view-name="search-entity-result-universal-template"]');
-                    const hasExpectedStructure = li.querySelector('div.mb1') && li.querySelector('div.t-14');
-                    
-                    const name = nameSpan?.innerText?.trim() || profileLink.innerText?.trim() || '(no name)';
-                    
-                    if (!hasResultTemplate && !hasExpectedStructure) {
-                        skippedReasons[name] = 'No result template or expected structure';
-                        return;
-                    }
-                    if (isInInsights) {
-                        skippedReasons[name] = 'In insights/mutual section';
-                        return;
-                    }
-                    if (!hasTitle && !hasLocation) {
-                        skippedReasons[name] = 'No title or location';
-                        return;
-                    }
-                    
-                    validCount++;
-                    const titleText = hasTitle?.innerText?.trim().substring(0, 40) || '(no title)';
-                    const locText = hasLocation?.innerText?.trim() || '(no location)';
-                    console.log(\`✅ \${name}: title="\${titleText}", loc="\${locText}"\`);
-                });
-                
-                console.log(\`\\n📊 Summary:\`);
-                console.log(\`   Valid profiles: \${validCount}\`);
-                console.log(\`   Skipped: \${Object.keys(skippedReasons).length}\`);
-                if (Object.keys(skippedReasons).length > 0) {
-                    console.log(\`\\n❌ Skipped profiles:\`);
-                    Object.entries(skippedReasons).forEach(([name, reason]) => {
-                        console.log(\`   - \${name}: \${reason}\`);
-                    });
-                }
-                
-                return {
-                    valid: validCount,
-                    skipped: Object.keys(skippedReasons).length,
-                    skippedReasons: skippedReasons
-                };
-            };
-            console.log('💡 Savvy Pirate: Run window.savvyPirateDiagnostic() in console to test filtering logic');
-        })();
-    `;
-    (document.head || document.documentElement).appendChild(script);
-    script.remove(); // Remove script tag after injection
+    // Note: Diagnostic function is available in content script context only
+    // Cannot inject into page context due to LinkedIn's Content Security Policy
+    // To use: Open DevTools console and the function will be available in content script scope
+    // Or use: chrome.runtime.sendMessage({ action: 'RUN_DIAGNOSTIC' }) from page console
 
     // ============================================================
     // INITIALIZATION
     // ============================================================
     console.log(`[CS] OK: Content script loaded (${SCRIPT_VERSION})`);
-    console.log(`[CS] 💡 Tip: Run window.savvyPirateDiagnostic() in console to test filtering logic`);
+    console.log(`[CS] 💡 Tip: Run diagnostic via chrome.runtime.sendMessage({ action: 'RUN_DIAGNOSTIC' }) from page console`);
     
     // Auto-validate selectors on search pages
     if (window.location.href.includes('linkedin.com/search/results/people')) {
