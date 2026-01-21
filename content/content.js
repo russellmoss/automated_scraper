@@ -805,7 +805,77 @@
         return rows;
     }
 
+    // ============================================================
+    // EMPTY STATE DETECTION
+    // ============================================================
+    /**
+     * Detects if the current page is an empty results page
+     * This MUST be checked BEFORE checking pagination or attempting to scrape
+     * @returns {Object} { isEmpty: boolean, reason: string, profileCount: number }
+     */
+    function detectEmptyResultsState() {
+        // Method 1: Check for empty state UI elements (most reliable on truly empty pages)
+        const emptyStateSelectors = [
+            '.search-reusable-search-no-results',
+            '.artdeco-empty-state',
+            'h2.artdeco-empty-state__headline'
+        ];
+        
+        for (const selector of emptyStateSelectors) {
+            const element = document.querySelector(selector);
+            if (element) {
+                console.log(`[CS] Empty state detected via selector: ${selector}`);
+                return { 
+                    isEmpty: true, 
+                    reason: `Empty state element found: ${selector}`,
+                    profileCount: 0
+                };
+            }
+        }
+        
+        // Method 2: Check the results header for "No results found" text
+        const resultsHeader = document.querySelector('.search-results-container h2');
+        if (resultsHeader && resultsHeader.textContent.toLowerCase().includes('no results')) {
+            console.log('[CS] Empty state detected via results header text');
+            return { 
+                isEmpty: true, 
+                reason: 'Results header contains "no results"',
+                profileCount: 0
+            };
+        }
+        
+        // Method 3: Count actual profile elements using the reliable data attribute
+        // This is the MOST reliable method since class names are obfuscated
+        const profileElements = document.querySelectorAll('[data-chameleon-result-urn]');
+        const profileCount = profileElements.length;
+        
+        console.log(`[CS] Profile count via [data-chameleon-result-urn]: ${profileCount}`);
+        
+        if (profileCount === 0) {
+            // Double-check by looking for the results list container
+            const resultsContainer = document.querySelector('.search-results-container');
+            if (resultsContainer) {
+                // Container exists but no profiles - this is an empty page
+                console.log('[CS] Results container exists but no profiles found');
+                return { 
+                    isEmpty: true, 
+                    reason: 'Results container present but zero profiles',
+                    profileCount: 0
+                };
+            }
+        }
+        
+        return { 
+            isEmpty: false, 
+            reason: profileCount > 0 ? `Found ${profileCount} profiles` : 'Page state unclear',
+            profileCount: profileCount
+        };
+    }
+
     function detectPaginationState() {
+        // FIRST: Check for empty state before anything else
+        const emptyCheck = detectEmptyResultsState();
+        
         const nextButton = document.querySelector(SELECTORS.NEXT_BUTTON);
         
         // Check if button exists and is enabled
@@ -823,9 +893,22 @@
         
         const actuallyHasNext = hasNext && !isAriaDisabled && !isHidden;
         
+        // Get current page number from URL
+        const urlParams = new URLSearchParams(window.location.search);
+        const currentPage = parseInt(urlParams.get('page')) || 1;
+        
+        // Get current page from active button (fallback)
+        const activePageButton = document.querySelector('button[aria-current="true"]');
+        const activePageNum = activePageButton ? parseInt(activePageButton.textContent.trim()) : currentPage;
+        
         return {
             hasNext: actuallyHasNext,
             button: nextButton,
+            currentPage: activePageNum || currentPage,
+            // NEW: Add empty state info to pagination state
+            isEmpty: emptyCheck.isEmpty,
+            emptyReason: emptyCheck.reason,
+            profileCount: emptyCheck.profileCount,
             details: {
                 exists: nextButton !== null,
                 disabled: nextButton?.disabled || false,
@@ -937,26 +1020,78 @@
         
         let totalProfiles = 0;
         let totalPages = 0;
+        let consecutiveEmptyPages = 0;
+        const MAX_CONSECUTIVE_EMPTY = 2; // Stop after 2 empty pages in a row
         
         try {
             while (totalPages < maxPages && !stopRequested) {
+                // =========================================================================
+                // NEW: Check for empty state FIRST, before waiting for entries
+                // This prevents getting stuck on empty pagination pages
+                // =========================================================================
+                
+                // Give the page a moment to render
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                
+                const emptyCheck = detectEmptyResultsState();
+                
+                if (emptyCheck.isEmpty) {
+                    console.log(`[CS] ✅ EMPTY PAGE DETECTED: ${emptyCheck.reason}`);
+                    console.log('[CS] Stopping pagination for this search - moving to next search');
+                    break; // EXIT the pagination loop, move to next search
+                }
+                
+                // =========================================================================
+                // END NEW SECTION - Continue with existing entry loading logic
+                // =========================================================================
+                
                 // Wait for entries to load (with timeout handling)
                 const entriesLoaded = await waitForEntriesToLoad(1, 20000);
                 
                 if (!entriesLoaded) {
-                    console.warn('[CS] WARNING: Timeout waiting for entries to load - checking if we\'re on last page');
-                    // Check pagination state - if no next button, we're done
+                    console.warn('[CS] WARNING: Timeout waiting for entries to load');
+                    
+                    // MODIFIED: Check empty state again after timeout
+                    const postTimeoutCheck = detectEmptyResultsState();
+                    
+                    if (postTimeoutCheck.isEmpty) {
+                        console.log('[CS] ✅ Empty state confirmed after timeout - stopping pagination');
+                        break;
+                    }
+                    
+                    // Only check pagination if we're NOT on an empty page
                     const pagination = detectPaginationState();
+                    
+                    // MODIFIED: Also check if pagination says we're on an empty page
+                    if (pagination.isEmpty || pagination.profileCount === 0) {
+                        console.log('[CS] ✅ No profiles found - stopping pagination');
+                        break;
+                    }
+                    
                     if (!pagination.hasNext) {
                         console.log('[CS] OK: No next button found after timeout - assuming last page');
                         break;
                     }
-                    // If there's a next button but entries didn't load, continue anyway (might be slow loading)
-                    console.log('[CS] WARNING: Entries didn\'t load but next button exists - continuing');
+                    
+                    // Only continue if we have reason to believe there might be results
+                    console.log('[CS] WARNING: Entries didn\'t load but page may have results - continuing cautiously');
                 }
                 
                 // Scrape current page
                 const rows = await scrapeCurrentPage(sourceName);
+                
+                // Track consecutive empty pages
+                if (rows.length === 0) {
+                    consecutiveEmptyPages++;
+                    console.log(`[CS] Warning: Empty page scraped. Consecutive empty pages: ${consecutiveEmptyPages}`);
+                    
+                    if (consecutiveEmptyPages >= MAX_CONSECUTIVE_EMPTY) {
+                        console.log(`[CS] ✅ ${MAX_CONSECUTIVE_EMPTY} consecutive empty pages - stopping pagination`);
+                        break;
+                    }
+                } else {
+                    consecutiveEmptyPages = 0; // Reset counter when we find results
+                }
                 
                 if (rows.length > 0) {
                     totalProfiles += rows.length;
@@ -974,6 +1109,14 @@
                     // If we scraped 0 profiles, check if we're on the last page
                     console.warn('[CS] WARNING: No profiles found on this page');
                     const pagination = detectPaginationState();
+                    
+                    // NEW: Check for empty state before checking next button
+                    if (pagination.isEmpty || pagination.profileCount === 0) {
+                        console.log('[CS] ✅ Current page is empty - stopping pagination');
+                        console.log(`[CS] Reason: ${pagination.emptyReason}`);
+                        break;
+                    }
+                    
                     if (!pagination.hasNext) {
                         console.log('[CS] OK: No profiles and no next button - assuming last page');
                         break;
@@ -985,11 +1128,37 @@
                 break;
             }
             
-            // Try to go to next page
-            const hasNext = await clickNextButton();
+            // Check pagination state
+            const pagination = detectPaginationState();
             
-            if (!hasNext) {
-                console.log('[CS] OK: No more pages available');
+            // NEW: Safety check - don't click next if page is empty
+            if (pagination.isEmpty || pagination.profileCount === 0) {
+                console.log('[CS] ✅ Current page is empty - stopping before clicking next');
+                console.log(`[CS] Reason: ${pagination.emptyReason}`);
+                break;
+            }
+            
+            // Try to go to next page
+            if (pagination.hasNext && totalPages < maxPages && !pagination.isEmpty) {
+                console.log(`[CS] Navigating to page ${totalPages + 1}...`);
+                const hasNext = await clickNextButton();
+                
+                if (!hasNext) {
+                    console.log('[CS] OK: No more pages available');
+                    break;
+                }
+                
+                // Wait for new page to load
+                await new Promise(resolve => setTimeout(resolve, 3000));
+                
+                // NEW: Immediately check if new page is empty
+                const newPageCheck = detectEmptyResultsState();
+                if (newPageCheck.isEmpty) {
+                    console.log('[CS] ✅ New page is empty after navigation - stopping');
+                    break;
+                }
+            } else {
+                console.log('[CS] No more pages or reached max - ending pagination');
                 break;
             }
             
