@@ -624,8 +624,35 @@ function recordObservationsBatch(data) {
     console.log(`[OBSERVATION] ⚠️ No advisorIds provided - will use fallback lookup`);
   }
   
+  // === NEW: DEDUPLICATION CHECK ===
+  const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+  
+  // Query existing observations for today to prevent duplicates
+  // Use composite key: advisor_id + recruiter_id + DATE(observed_at)
+  const existingQuery = `
+    SELECT advisor_id 
+    FROM \`${PROJECT_ID}.${DATASET_ID}.connection_observations\`
+    WHERE recruiter_id = '${escapeSql(recruiter_id)}'
+      AND DATE(observed_at) = '${today}'
+      AND advisor_id IS NOT NULL
+  `;
+  
+  let existingAdvisorIds = new Set();
+  try {
+    const existingResult = runQuery(existingQuery);
+    existingAdvisorIds = new Set(
+      (existingResult || []).map(row => row.advisor_id || row.f?.[0]?.v || null).filter(id => id !== null)
+    );
+    console.log(`[OBSERVATION] Found ${existingAdvisorIds.size} existing observations for today`);
+  } catch (error) {
+    console.warn(`[OBSERVATION] Failed to check existing observations (non-critical):`, error);
+    // Continue without deduplication if query fails
+  }
+  // === END DEDUPLICATION CHECK ===
+  
   const now = new Date().toISOString();
   const rows = [];
+  let skippedCount = 0;
   
   // Process each profile - use advisor_id from sync result if available
   for (let idx = 0; idx < profiles.length; idx++) {
@@ -709,6 +736,14 @@ function recordObservationsBatch(data) {
       }
     }
     
+    // === NEW: CHECK FOR DUPLICATE BEFORE ADDING TO ROWS ===
+    if (advisorId && existingAdvisorIds.has(advisorId)) {
+      console.log(`[OBSERVATION] ⏭️ Skipping duplicate observation for advisor_id: ${advisorId}`);
+      skippedCount++;
+      continue; // Skip this profile
+    }
+    // === END DUPLICATE CHECK ===
+    
     rows.push({
       id: `obs_${Date.now()}_${idx}_${Math.random().toString(36).substr(2, 9)}`,
       scrape_run_id: scrape_run_id || null,
@@ -725,14 +760,23 @@ function recordObservationsBatch(data) {
     });
   }
   
+  if (skippedCount > 0) {
+    console.log(`[OBSERVATION] ⏭️ Skipped ${skippedCount} duplicate observations for recruiter ${recruiter_id}`);
+  }
+  
+  if (rows.length === 0) {
+    return { success: true, recorded: 0, skipped: skippedCount, message: 'All observations were duplicates' };
+  }
+  
   try {
     insertRows('connection_observations', rows);
-    console.log(`[OBSERVATION] Successfully recorded ${rows.length} observations`);
+    console.log(`[OBSERVATION] Successfully recorded ${rows.length} observations (skipped ${skippedCount} duplicates)`);
     
     return { 
       success: true, 
       recorded: rows.length,
-      message: `Recorded ${rows.length} observations`
+      skipped: skippedCount,
+      message: `Recorded ${rows.length} observations, skipped ${skippedCount} duplicates`
     };
   } catch (error) {
     console.error('[OBSERVATION] Batch error:', error);

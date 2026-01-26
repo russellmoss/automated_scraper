@@ -340,17 +340,23 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
             break;
             
         case ALARM_NAMES.QUEUE_PROCESS:
-            console.log(`${LOG} Queue process tick`);
+            console.log(`${LOG} Queue process tick [ALARM]`);
             try {
                 const result = await processQueue();
-                if (result.synced > 0 || result.failed > 0) {
-                    chrome.runtime.sendMessage({
-                        action: 'QUEUE_UPDATED',
-                        ...result
-                    }).catch(() => {});
+                if (result?.skipped) {
+                    console.log(`${LOG} ⏸️ Alarm-triggered processing skipped (${result.reason})`);
+                } else if (result) {
+                    console.log(`${LOG} ✅ Alarm-triggered processing: ${result.synced} synced, ${result.failed} failed, ${result.pending} pending`);
+                    // Send update message if items were processed
+                    if (result.synced > 0 || result.failed > 0) {
+                        chrome.runtime.sendMessage({
+                            action: 'QUEUE_UPDATED',
+                            ...result
+                        }).catch(() => {});
+                    }
                 }
             } catch (e) {
-                console.error(`${LOG} Queue process error:`, e);
+                console.error(`${LOG} ❌ Queue process error:`, e);
             }
             break;
 
@@ -1026,8 +1032,7 @@ async function processAutoRunQueue() {
             console.log(`${LOG} Waiting ${(delay/1000).toFixed(0)}s before next search...`);
             await new Promise(resolve => setTimeout(resolve, delay));
             
-            // Noise activity (40% chance) - browse LinkedIn naturally
-            await performNoiseActivity(tab.id);
+            // Noise activity removed - go straight to next search
         }
         
         // Reset for next source
@@ -1348,10 +1353,8 @@ async function processManualScrape() {
         }
         await new Promise(resolve => setTimeout(resolve, delay));
         
-        // Noise activity between searches
+        // Noise activity removed - go straight to next search
         if (nextSearchIndex < searches.length) {
-            console.log(`${LOG} 🔄 Performing noise activity before next search...`);
-            await performNoiseActivity(tab.id);
             console.log(`${LOG} 🚀 Starting search ${nextSearchIndex + 1}/${searches.length}...`);
         }
     }
@@ -1782,8 +1785,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         const { tabName } = await ensureWeeklyTab(workbookId);
                         await addToQueue(rows, workbookId, tabName);
                         
-                        // Trigger immediate queue processing
-                        processQueue().catch(e => console.error(`${LOG} Queue error:`, e));
+                        // Process queue immediately (lock check happens inside processQueue)
+                        console.log(`${LOG} 📥 Data scraped, triggering queue processing [IMMEDIATE]`);
+                        processQueue()
+                            .then(result => {
+                                if (result?.skipped) {
+                                    console.log(`${LOG} ⏸️ Immediate processing skipped (${result.reason}) - alarm will handle`);
+                                } else if (result) {
+                                    console.log(`${LOG} ✅ Immediate processing: ${result.synced} synced, ${result.pending} pending`);
+                                }
+                            })
+                            .catch(e => console.error(`${LOG} ❌ Queue error:`, e));
                     }
                     
                     response = { success: true, queued: rows.length };

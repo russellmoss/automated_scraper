@@ -872,9 +872,12 @@
         };
     }
 
-    function detectPaginationState() {
-        // FIRST: Check for empty state before anything else
-        const emptyCheck = detectEmptyResultsState();
+    function detectPaginationState(checkEmpty = false) {
+        // Only check for empty state if explicitly requested
+        let emptyCheck = { isEmpty: false, reason: null, profileCount: null };
+        if (checkEmpty) {
+            emptyCheck = detectEmptyResultsState();
+        }
         
         const nextButton = document.querySelector(SELECTORS.NEXT_BUTTON);
         
@@ -918,16 +921,39 @@
         };
     }
 
-    async function clickNextButton() {
-        const pagination = detectPaginationState();
+    async function clickNextButton(pagination) {
+        const nextButton = pagination?.button || document.querySelector(SELECTORS.NEXT_BUTTON);
         
-        if (!pagination.hasNext || !pagination.button) {
+        if (!nextButton) {
+            console.error('[CS] ❌ No Next button found');
             return false;
         }
         
-        pagination.button.click();
-        await wait(2000);
+        const urlBefore = window.location.href;
+        const pageBefore = new URLSearchParams(window.location.search).get('page') || '1';
         
+        console.log(`[CS] 🖱️ Clicking Next button (current page: ${pageBefore})...`);
+        nextButton.click();
+        
+        // Wait for navigation
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+        // Verify navigation succeeded
+        const urlAfter = window.location.href;
+        const pageAfter = new URLSearchParams(window.location.search).get('page') || '1';
+        
+        if (urlBefore === urlAfter) {
+            console.warn(`[CS] ⚠️ URL did not change - navigation may have failed`);
+            // Wait longer and check again
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            const urlAfterWait = window.location.href;
+            if (urlBefore === urlAfterWait) {
+                console.error(`[CS] ❌ Navigation failed - URL unchanged after 5s`);
+                return false;
+            }
+        }
+        
+        console.log(`[CS] ✅ Successfully navigated to page ${pageAfter}`);
         return true;
     }
 
@@ -1026,6 +1052,22 @@
         try {
             while (totalPages < maxPages && !stopRequested) {
                 // =========================================================================
+                // ENHANCED LOGGING FOR DEBUGGING
+                // =========================================================================
+                console.log(`[CS] ========== PAGE ${totalPages + 1} START ==========`);
+                console.log(`[CS] URL: ${window.location.href}`);
+                console.log(`[CS] Total profiles so far: ${totalProfiles}`);
+                console.log(`[CS] Total pages so far: ${totalPages}`);
+                
+                // Check current page state
+                const currentPageState = detectEmptyResultsState();
+                console.log(`[CS] Current page state:`, {
+                    isEmpty: currentPageState.isEmpty,
+                    profileCount: currentPageState.profileCount,
+                    reason: currentPageState.reason
+                });
+                
+                // =========================================================================
                 // NEW: Check for empty state FIRST, before waiting for entries
                 // This prevents getting stuck on empty pagination pages
                 // =========================================================================
@@ -1060,7 +1102,8 @@
                     }
                     
                     // Only check pagination if we're NOT on an empty page
-                    const pagination = detectPaginationState();
+                    // Pass true to check for empty state (we want to know if page is empty after timeout)
+                    const pagination = detectPaginationState(true);
                     
                     // MODIFIED: Also check if pagination says we're on an empty page
                     if (pagination.isEmpty || pagination.profileCount === 0) {
@@ -1108,7 +1151,8 @@
                 } else {
                     // If we scraped 0 profiles, check if we're on the last page
                     console.warn('[CS] WARNING: No profiles found on this page');
-                    const pagination = detectPaginationState();
+                    // Pass true to check for empty state (we want to know if page is empty when 0 profiles scraped)
+                    const pagination = detectPaginationState(true);
                     
                     // NEW: Check for empty state before checking next button
                     if (pagination.isEmpty || pagination.profileCount === 0) {
@@ -1129,34 +1173,57 @@
             }
             
             // Check pagination state
-            const pagination = detectPaginationState();
+            // DO NOT check for empty here - we already know this page has results
+            // Check pagination WITHOUT checking for empty (we'll check after navigation)
+            const pagination = detectPaginationState(false); // checkEmpty = false
             
-            // NEW: Safety check - don't click next if page is empty
-            if (pagination.isEmpty || pagination.profileCount === 0) {
-                console.log('[CS] ✅ Current page is empty - stopping before clicking next');
-                console.log(`[CS] Reason: ${pagination.emptyReason}`);
+            // Only check if Next button exists (don't check isEmpty)
+            if (!pagination.hasNext) {
+                console.log('[CS] No next button found - stopping');
                 break;
             }
             
+            // Log for debugging
+            console.log(`[CS] ✅ Next button found, continuing to next page...`);
+            
             // Try to go to next page
-            if (pagination.hasNext && totalPages < maxPages && !pagination.isEmpty) {
+            if (pagination.hasNext && totalPages < maxPages) {
                 console.log(`[CS] Navigating to page ${totalPages + 1}...`);
-                const hasNext = await clickNextButton();
+                const navigationSuccess = await clickNextButton(pagination);
                 
-                if (!hasNext) {
-                    console.log('[CS] OK: No more pages available');
+                if (!navigationSuccess) {
+                    console.error('[CS] ❌ Navigation failed - stopping');
                     break;
                 }
                 
-                // Wait for new page to load
+                // Wait for new page to load with retry logic for lazy loading
+                console.log('[CS] ⏳ Waiting for new page to load...');
                 await new Promise(resolve => setTimeout(resolve, 3000));
                 
-                // NEW: Immediately check if new page is empty
-                const newPageCheck = detectEmptyResultsState();
-                if (newPageCheck.isEmpty) {
-                    console.log('[CS] ✅ New page is empty after navigation - stopping');
+                // Check if new page is empty with retries (handle LinkedIn lazy loading)
+                let newPageState = null;
+                let retries = 3;
+                for (let i = 0; i < retries; i++) {
+                    newPageState = detectEmptyResultsState();
+                    
+                    if (!newPageState.isEmpty) {
+                        console.log(`[CS] ✅ New page has ${newPageState.profileCount} profiles`);
+                        break; // Page has content, continue
+                    }
+                    
+                    if (i < retries - 1) {
+                        console.log(`[CS] ⏳ Page appears empty, retry ${i + 1}/${retries - 1} after 2s...`);
+                        await new Promise(resolve => setTimeout(resolve, 2000));
+                    }
+                }
+                
+                if (newPageState.isEmpty) {
+                    console.log(`[CS] 🛑 New page is empty after ${retries} checks - stopping`);
+                    console.log(`[CS] Reason: ${newPageState.reason}`);
                     break;
                 }
+                
+                console.log(`[CS] ✅ Continuing with page scraping...`);
             } else {
                 console.log('[CS] No more pages or reached max - ending pagination');
                 break;
@@ -1176,6 +1243,21 @@
         }
         
         const wasAborted = stopRequested;
+        
+        // =========================================================================
+        // PRE-COMPLETION VALIDATION
+        // =========================================================================
+        console.log(`[CS] ========== SCRAPING COMPLETED ==========`);
+        console.log(`[CS] Total profiles scraped: ${totalProfiles}`);
+        console.log(`[CS] Total pages scraped: ${totalPages}`);
+        console.log(`[CS] Final URL: ${window.location.href}`);
+        
+        // Final validation
+        if (totalPages < 5 && totalProfiles < 50) {
+            console.warn(`[CS] ⚠️ WARNING: Only ${totalPages} pages with ${totalProfiles} profiles`);
+            console.warn(`[CS] This might indicate premature stopping - please verify`);
+        }
+        
         console.log(`[CS] OK: Scraping ${wasAborted ? 'stopped' : 'complete'}: ${totalProfiles} profiles from ${totalPages} pages`);
         
         // Send completion message
@@ -1183,7 +1265,8 @@
             action: 'SCRAPING_COMPLETE',
             totalProfiles: totalProfiles,
             totalPages: totalPages,
-            aborted: wasAborted
+            aborted: wasAborted,
+            finalUrl: window.location.href
         });
             
         } catch (error) {

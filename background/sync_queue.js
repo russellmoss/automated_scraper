@@ -8,6 +8,11 @@ const LOG = LOG_PREFIXES.QUEUE;
 const MAX_RETRIES = CONFIG.MAX_RETRIES;
 const BASE_DELAY_MS = CONFIG.BASE_DELAY_MS;
 
+// === QUEUE PROCESSING LOCK ===
+const QUEUE_LOCK_KEY = 'queueProcessingLock';
+const LOCK_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes - stale lock timeout
+const LOCK_HEARTBEAT_MS = 30 * 1000;   // 30 seconds - update lock while processing
+
 // ============================================================
 // STORAGE HELPERS
 // ============================================================
@@ -114,25 +119,172 @@ export async function addToQueue(rows, spreadsheetId, tabName) {
     return queueItem;
 }
 
+// ============================================================
+// QUEUE PROCESSING LOCK HELPERS
+// ============================================================
+
+/**
+ * Attempts to acquire the queue processing lock.
+ * Returns { acquired: true, processId } if successful.
+ * Returns { acquired: false, reason } if lock is held.
+ */
+async function acquireQueueLock() {
+    const { [QUEUE_LOCK_KEY]: existingLock } = await chrome.storage.local.get([QUEUE_LOCK_KEY]);
+    const now = Date.now();
+    
+    // Check if lock exists and is not stale
+    if (existingLock?.isLocked) {
+        const lockAge = now - (existingLock.timestamp || 0);
+        if (lockAge < LOCK_TIMEOUT_MS) {
+            return { 
+                acquired: false, 
+                reason: 'lock_held',
+                lockAge: Math.round(lockAge / 1000),
+                heldBy: existingLock.processId 
+            };
+        }
+        // Lock is stale - we can take it
+        console.log(`${LOG} ⚠️ Stale lock detected (${Math.round(lockAge / 1000)}s old), taking over`);
+    }
+    
+    // Generate unique process ID for this processing run
+    const processId = `${now}-${Math.random().toString(36).substring(2, 8)}`;
+    
+    // Acquire lock
+    const newLock = { 
+        isLocked: true, 
+        timestamp: now, 
+        processId,
+        acquiredAt: new Date(now).toISOString()
+    };
+    await chrome.storage.local.set({ [QUEUE_LOCK_KEY]: newLock });
+    
+    // Verify we got the lock (optimistic locking check)
+    // Delay for SD card write (Pi compatibility) - 100ms recommended for slower SD cards
+    const isPi = navigator.userAgent.includes('CrOS');
+    await new Promise(resolve => setTimeout(resolve, isPi ? 100 : 50));
+    
+    const { [QUEUE_LOCK_KEY]: verify } = await chrome.storage.local.get([QUEUE_LOCK_KEY]);
+    if (verify?.processId === processId) {
+        console.log(`${LOG} 🔒 Lock acquired (processId: ${processId})`);
+        return { acquired: true, processId };
+    }
+    
+    // Another process got the lock (rare race condition)
+    console.log(`${LOG} ⚠️ Lock race - another process acquired lock`);
+    return { acquired: false, reason: 'race_condition' };
+}
+
+/**
+ * Releases the queue processing lock.
+ * Only releases if we hold the lock (matching processId).
+ */
+async function releaseQueueLock(processId) {
+    if (!processId) return;
+    
+    const { [QUEUE_LOCK_KEY]: existingLock } = await chrome.storage.local.get([QUEUE_LOCK_KEY]);
+    
+    // Only release if we hold the lock
+    if (existingLock?.processId === processId) {
+        await chrome.storage.local.set({ 
+            [QUEUE_LOCK_KEY]: { 
+                isLocked: false, 
+                timestamp: 0, 
+                processId: null,
+                releasedAt: new Date().toISOString()
+            } 
+        });
+        console.log(`${LOG} 🔓 Lock released (processId: ${processId})`);
+    } else {
+        console.log(`${LOG} ⚠️ Lock release skipped - not owner (ours: ${processId}, current: ${existingLock?.processId})`);
+    }
+}
+
+/**
+ * Updates the lock timestamp to prevent stale detection during long operations.
+ * Call this periodically during processing.
+ */
+async function updateLockHeartbeat(processId) {
+    if (!processId) return;
+    
+    const { [QUEUE_LOCK_KEY]: existingLock } = await chrome.storage.local.get([QUEUE_LOCK_KEY]);
+    
+    if (existingLock?.processId === processId) {
+        await chrome.storage.local.set({ 
+            [QUEUE_LOCK_KEY]: { 
+                ...existingLock, 
+                timestamp: Date.now(),
+                lastHeartbeat: new Date().toISOString()
+            } 
+        });
+    }
+}
+
+/**
+ * Checks if queue lock is currently held (for external callers).
+ * Returns { isLocked, lockAge, processId } or { isLocked: false }
+ */
+export async function isQueueLocked() {
+    const { [QUEUE_LOCK_KEY]: lock } = await chrome.storage.local.get([QUEUE_LOCK_KEY]);
+    
+    if (!lock?.isLocked) {
+        return { isLocked: false };
+    }
+    
+    const lockAge = Date.now() - (lock.timestamp || 0);
+    const isStale = lockAge >= LOCK_TIMEOUT_MS;
+    
+    return {
+        isLocked: !isStale,
+        lockAge: Math.round(lockAge / 1000),
+        processId: lock.processId,
+        isStale
+    };
+}
+
+// ============================================================
+// QUEUE PROCESSING
+// ============================================================
+
 /**
  * Process all items in the queue
  * @returns {Promise<{synced: number, failed: number, pending: number}>}
  */
 export async function processQueue() {
-    const queue = await getQueue();
+    // === LOCK ACQUISITION ===
+    const lockResult = await acquireQueueLock();
     
-    if (queue.length === 0) {
-        return { synced: 0, failed: 0, pending: 0 };
+    if (!lockResult.acquired) {
+        console.log(`${LOG} ⏸️ Queue processing skipped - ${lockResult.reason} (lock age: ${lockResult.lockAge || 0}s, held by: ${lockResult.heldBy || 'unknown'})`);
+        return { synced: 0, failed: 0, pending: 0, skipped: true, reason: lockResult.reason };
     }
     
-    console.log(`${LOG} Processing ${queue.length} queued items...`);
+    const { processId } = lockResult;
+    let heartbeatInterval = null;
     
-    let synced = 0;
-    let failed = 0;
-    const remainingQueue = [];
-    const newFailedRows = [];
-    
-    for (const item of queue) {
+    try {
+        // Start heartbeat to prevent stale lock during long processing
+        heartbeatInterval = setInterval(() => {
+            updateLockHeartbeat(processId).catch(err => {
+                console.warn(`${LOG} Heartbeat update failed:`, err);
+            });
+        }, LOCK_HEARTBEAT_MS);
+        
+        // === EXISTING QUEUE PROCESSING CODE STARTS HERE ===
+        const queue = await getQueue();
+        
+        if (queue.length === 0) {
+            return { synced: 0, failed: 0, pending: 0 };
+        }
+        
+        console.log(`${LOG} Processing ${queue.length} queued items...`);
+        
+        let synced = 0;
+        let failed = 0;
+        const remainingQueue = [];
+        const newFailedRows = [];
+        
+        for (const item of queue) {
         try {
             // Attempt to sync to Google Sheets
             await appendRowsToTab(item.spreadsheetId, item.tabName, item.rows);
@@ -272,23 +424,38 @@ export async function processQueue() {
                 remainingQueue.push(item);
             }
         }
+        }
+        
+        // Save updated queues
+        await saveQueue(remainingQueue);
+        
+        if (newFailedRows.length > 0) {
+            const existingFailed = await getFailedRows();
+            await saveFailedRows([...existingFailed, ...newFailedRows]);
+        }
+        
+        console.log(`${LOG} Queue processing complete: ${synced} synced, ${failed} failed, ${remainingQueue.length} pending`);
+        
+        // Return results
+        return {
+            synced,
+            failed,
+            pending: remainingQueue.length
+        };
+        
+    } catch (error) {
+        console.error(`${LOG} ❌ Queue processing error:`, error);
+        // Re-throw to allow caller to handle
+        throw error;
+    } finally {
+        // === LOCK RELEASE (ALWAYS RUNS, EVEN ON ERROR) ===
+        if (heartbeatInterval) {
+            clearInterval(heartbeatInterval);
+        }
+        await releaseQueueLock(processId).catch(err => {
+            console.error(`${LOG} ⚠️ Failed to release lock:`, err);
+        });
     }
-    
-    // Save updated queues
-    await saveQueue(remainingQueue);
-    
-    if (newFailedRows.length > 0) {
-        const existingFailed = await getFailedRows();
-        await saveFailedRows([...existingFailed, ...newFailedRows]);
-    }
-    
-    console.log(`${LOG} Queue processing complete: ${synced} synced, ${failed} failed, ${remainingQueue.length} pending`);
-    
-    return {
-        synced,
-        failed,
-        pending: remainingQueue.length
-    };
 }
 
 /**
